@@ -7,10 +7,9 @@ import globalVars
 import gui
 import gui.guiHelper
 import gui.settingsDialogs
-import synthDriverHandler
 import wx
 
-from synthDrivers.phononLocal import _runtime, _settings
+from synthDrivers.phononLocal import _settings
 from ._updater import GitHubReleaseUpdater
 
 addonHandler.initTranslation()
@@ -22,16 +21,8 @@ class PhononSettingsPanel(gui.settingsDialogs.SettingsPanel):
 
     def makeSettings(self, settingsSizer):
         helper = gui.guiHelper.BoxSizerHelper(self, sizer=settingsSizer)
-        status = (_("The multilingual model and voices are installed. No speech server is required.")
-                  if _runtime.available() else
-                  _("Phonon requires 64-bit NVDA, an AVX2-capable processor and its bundled model files."))
-        self.status = helper.addLabeledControl(_("Model &status:"), wx.TextCtrl,
-                                              style=wx.TE_READONLY | wx.TE_MULTILINE)
-        self.status.SetName(_("Model status"))
-        self.status.SetValue(status)
-        self.use = helper.addItem(wx.Button(self, label=_("Use &Phonon")))
-        self.use.Enable(_runtime.available())
-        self.use.Bind(wx.EVT_BUTTON, self.onUse)
+        self.gpu = helper.addItem(wx.CheckBox(self, label=_("Use &GPU acceleration when available")))
+        self.gpu.SetValue(_settings.use_gpu())
         self.interval = helper.addLabeledControl(_("Check for &updates:"), wx.Choice,
                                                choices=[_("Never"), _("Hourly"), _("Daily")])
         self.interval.SetName(_("Check for updates"))
@@ -42,17 +33,11 @@ class PhononSettingsPanel(gui.settingsDialogs.SettingsPanel):
         self.help.Bind(wx.EVT_BUTTON, self.onHelp)
 
     def onSave(self):
+        _settings.save_use_gpu(self.gpu.GetValue())
         value = _settings.INTERVALS[self.interval.GetSelection()]
         _settings.save_interval(value)
         if _updater is not None:
             _updater.setInterval(value)
-
-    def onUse(self, event):
-        if synthDriverHandler.setSynth("phononLocal"):
-            self.status.SetValue(_("Phonon is active. Choose Language filter and Voice in Speech settings or the synth settings ring."))
-        else:
-            self.status.SetValue(_("Phonon could not be loaded. Check the NVDA log for details."))
-        self.status.SetFocus()
 
     def onCheck(self, event):
         if _updater is not None:
@@ -76,6 +61,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         if getattr(globalVars.appArgs, "secure", False):
             return
         _settings.update_interval()
+        _settings.use_gpu()
         self._updater = GitHubReleaseUpdater("phononLocal", "Phonon", "OnjLouis", "phononNVDA")
         _updater = self._updater
         self._updater.start()

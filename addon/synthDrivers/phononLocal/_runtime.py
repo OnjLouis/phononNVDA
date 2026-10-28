@@ -1,19 +1,33 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Serialized access to Gradium's CPU C API; no network or audio-device access."""
+"""Serialized access to Phonon's C API; no network or audio-device access."""
 import ctypes as C
 import os
 from pathlib import Path
 import sys
 import threading
 
+from logHandler import log
+
 SAMPLE_RATE = 24000
 MAX_INPUT = 4096
+UNIT_CPU = 0
+UNIT_VULKAN = 3
+LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800
 LANGUAGES = frozenset(("en", "fr", "de", "es", "pt"))
 MODEL = Path(__file__).resolve().parents[2] / "data" / "phonon"
 BIN = Path(__file__).resolve().parent / "bin"
 FRAME = C.CFUNCTYPE(C.c_bool, C.POINTER(C.c_float), C.c_size_t, C.c_void_p)
 _DLL = None
 _DLL_LOCK = threading.Lock()
+_VULKAN = None
+
+
+def _vulkan_loader():
+    global _VULKAN
+    if _VULKAN is None:
+        loader = Path(os.environ['SystemRoot']) / 'System32' / 'vulkan-1.dll'
+        _VULKAN = C.WinDLL(str(loader), winmode=LOAD_LIBRARY_SEARCH_SYSTEM32)
+    return _VULKAN
 
 
 class NativeError(RuntimeError):
@@ -64,19 +78,51 @@ def _library():
 
 
 class Engine:
-    def __init__(self, model=MODEL):
+    def __init__(self, model=MODEL, use_gpu=False):
         self._owner = threading.get_ident()
         self._handle = None
+        self.backend = 'CPU'
         if not supported():
             raise NativeError("Phonon requires 64-bit NVDA and an AVX2-capable processor.")
         try:
             self._dll = _library()
-            self._handle = self._dll.ptts_new(str(model).encode("utf-8"), 0, b"en")
+            if use_gpu:
+                try:
+                    _vulkan_loader()
+                    self._open(model, UNIT_VULKAN)
+                    self._prime_gpu()
+                    self.backend = 'GPU (Vulkan)'
+                except (OSError, NativeError) as error:
+                    self.close()
+                    log.warning('Phonon GPU initialization failed; using CPU: %s', error)
             if not self._handle:
-                raise NativeError("Phonon could not load its bundled model.")
+                self._open(model, UNIT_CPU)
         except BaseException:
             self.close()
             raise
+
+    def _error(self):
+        detail = self._dll.ptts_last_error(self._handle)
+        return detail.decode('utf-8', errors='replace')[:512] if detail else 'Unknown native engine error'
+
+    def _open(self, model, unit):
+        self._handle = self._dll.ptts_new(str(model).encode('utf-8'), unit, b'en')
+        if not self._handle:
+            raise NativeError('Phonon could not load its bundled model: ' + self._error())
+
+    def _prime_gpu(self):
+        # Validate real synthesis on the worker before choosing a GPU for speech.
+        samples = 0
+        @FRAME
+        def discard(pcm, count, user):
+            nonlocal samples
+            samples += count
+            return True
+        result = Result()
+        if not self._dll.ptts_speak(self._handle, b'A', discard, None, C.byref(result)):
+            raise NativeError('GPU synthesis is unavailable: ' + self._error())
+        if not samples:
+            raise NativeError('GPU initialization produced no audio.')
 
     def _check_owner(self):
         if threading.get_ident() != self._owner:

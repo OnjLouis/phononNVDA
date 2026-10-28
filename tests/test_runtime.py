@@ -1,6 +1,7 @@
 import ctypes as C
 import threading
 import unittest
+from unittest.mock import patch
 
 from test_driver import driver_module
 from synthDrivers.phononLocal import _runtime as runtime
@@ -59,6 +60,75 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.language('fr-FR'), 'fr')
         self.assertEqual(runtime.language('pt_BR'), 'pt')
         self.assertEqual(runtime.language('unknown'), 'en')
+
+
+class InitializingDLL(DLL):
+    def __init__(self, handles=(1,), warm_success=True):
+        super().__init__()
+        self.handles = iter(handles)
+        self.units, self.freed = [], []
+        self.warm_success = warm_success
+
+    def ptts_new(self, model, unit, locale):
+        self.units.append(unit)
+        return next(self.handles)
+
+    def ptts_last_error(self, handle): return b'fixture backend unavailable'
+    def ptts_free(self, handle): self.freed.append(handle)
+    def ptts_speak(self, *args):
+        if not self.warm_success:
+            return False
+        return super().ptts_speak(*args)
+
+
+class BackendTests(unittest.TestCase):
+    def open(self, dll, gpu=False, loader_error=None):
+        with patch.object(runtime, 'supported', return_value=True), \
+                patch.object(runtime, '_library', return_value=dll), \
+                patch.object(runtime, '_vulkan_loader', side_effect=loader_error) as loader:
+            engine = runtime.Engine(use_gpu=gpu)
+        self.addCleanup(engine.close)
+        return engine, loader
+
+    def test_cpu_default_does_not_load_gpu_driver(self):
+        dll = InitializingDLL()
+        engine, loader = self.open(dll)
+        self.assertEqual(dll.units, [0])
+        self.assertEqual(engine.backend, 'CPU')
+        loader.assert_not_called()
+
+    def test_gpu_is_validated_without_playing_its_warmup(self):
+        dll = InitializingDLL()
+        engine, loader = self.open(dll, gpu=True)
+        self.assertEqual(dll.units, [3])
+        self.assertEqual(engine.backend, 'GPU (Vulkan)')
+        self.assertEqual(dll.delivered, 1)
+        loader.assert_called_once_with()
+
+    def test_gpu_initialization_failure_falls_back_to_cpu(self):
+        dll = InitializingDLL(handles=(0, 2))
+        engine, _ = self.open(dll, gpu=True)
+        self.assertEqual(dll.units, [3, 0])
+        self.assertEqual(engine.backend, 'CPU')
+
+    def test_failed_gpu_warmup_frees_handle_before_cpu_fallback(self):
+        dll = InitializingDLL(handles=(1, 2), warm_success=False)
+        engine, _ = self.open(dll, gpu=True)
+        self.assertEqual(dll.units, [3, 0])
+        self.assertEqual(dll.freed, [1])
+        self.assertEqual(engine.backend, 'CPU')
+
+    def test_missing_vulkan_loader_does_not_prevent_cpu_speech(self):
+        dll = InitializingDLL()
+        engine, _ = self.open(dll, gpu=True, loader_error=OSError('fixture missing loader'))
+        self.assertEqual(dll.units, [0])
+        self.assertEqual(engine.backend, 'CPU')
+
+    def test_cpu_failure_retains_the_native_error(self):
+        with patch.object(runtime, 'supported', return_value=True), \
+                patch.object(runtime, '_library', return_value=InitializingDLL(handles=(0,))):
+            with self.assertRaisesRegex(runtime.NativeError, 'fixture backend unavailable'):
+                runtime.Engine()
 
 
 if __name__ == '__main__': unittest.main()

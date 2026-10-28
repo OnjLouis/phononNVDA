@@ -17,6 +17,7 @@ from synthDriverHandler import SynthDriver as BaseSynth, VoiceInfo, synthDoneSpe
 from ._audio import Processor, percent
 from ._runtime import Engine, MODEL, SAMPLE_RATE, available, language
 from ._sequence import events
+from . import _settings
 from ._voice_languages import GROUPS, LANGUAGES, normalise
 
 
@@ -54,6 +55,7 @@ class SynthDriver(BaseSynth):
         self._fallbackPending = threading.Event()
         self._latest_job = 0
         self._jobs = queue.Queue()
+        self._useGpu = _settings.use_gpu()
         self._player = nvwave.WavePlayer(1, SAMPLE_RATE, 16, outputDevice=config.conf["audio"]["outputDevice"])
         self._worker = threading.Thread(target=self._run, name="Phonon native speech", daemon=True)
         self._worker.start()
@@ -256,8 +258,9 @@ class SynthDriver(BaseSynth):
         engine = None
         try:
             start = time.monotonic()
-            engine = Engine()
-            log.info("Phonon 0.1.0 CPU engine ready: %d voices; load %.3f s.", len(self._voices), time.monotonic() - start)
+            engine = Engine(use_gpu=self._useGpu)
+            log.info("Phonon 1.0 %s engine ready: %d voices; load %.3f s.", engine.backend,
+                     len(self._voices), time.monotonic() - start)
             while True:
                 job = self._jobs.get()
                 try:

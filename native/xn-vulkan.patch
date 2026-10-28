@@ -1,0 +1,798 @@
+--- a/src/vulkan_backend/mod.rs
++++ b/src/vulkan_backend/mod.rs
+@@ -27,6 +27,12 @@
+ use std::ffi::CStr;
+ use std::marker::PhantomData;
+ use std::sync::{Arc, Mutex};
++
++mod rollback;
++use rollback::{BufferRollback, DeviceRollback, PipelineRollback};
++
++#[cfg(test)]
++mod native_safety_tests;
+ 
+ #[allow(dead_code)]
+ mod shaders {
+@@ -275,7 +281,11 @@
+ 
+ impl Device {
+     pub fn new(ordinal: usize) -> Result<Self> {
+-        let entry = unsafe { ash::Entry::load() }
++        #[cfg(test)]
++        let entry = native_safety_tests::load_entry();
++        #[cfg(not(test))]
++        let entry = unsafe { ash::Entry::load() };
++        let entry = entry
+             .map_err(|e| crate::Error::msg(format!("vulkan: failed to load loader: {e:?}")))?;
+ 
+         let app_info = vk::ApplicationInfo::default()
+@@ -284,11 +294,11 @@
+         let create_info = vk::InstanceCreateInfo::default().application_info(&app_info);
+         let instance = unsafe { entry.create_instance(&create_info, None) }
+             .map_err(vkerr("create_instance"))?;
++        let mut rollback = DeviceRollback::new(&instance);
+ 
+         let pdevices =
+             unsafe { instance.enumerate_physical_devices() }.map_err(vkerr("enumerate_devices"))?;
+         if pdevices.is_empty() {
+-            unsafe { instance.destroy_instance(None) };
+             crate::bail!("vulkan: no physical devices found (is a Vulkan driver installed?)");
+         }
+ 
+@@ -375,12 +385,15 @@
+         }
+         let device = unsafe { instance.create_device(pdevice, &device_create, None) }
+             .map_err(vkerr("create_device"))?;
++        rollback.device = Some(device.clone());
+         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+         let mem_props = unsafe { instance.get_physical_device_memory_properties(pdevice) };
+ 
+         // Optional GPU profiling via timestamp queries (XN_VULKAN_PROFILE=1).
+         let profile_requested =
+             std::env::var("XN_VULKAN_PROFILE").is_ok_and(|v| !v.is_empty() && v != "0");
++        #[cfg(test)]
++        let profile_requested = native_safety_tests::profile_requested(profile_requested);
+         let profile_enabled =
+             profile_requested && qfams[queue_family_index as usize].timestamp_valid_bits != 0;
+         let timestamp_period = props.limits.timestamp_period as f64;
+@@ -392,10 +405,9 @@
+         } else {
+             vk::QueryPool::null()
+         };
++        rollback.query_pool = query_pool;
+ 
+         // Descriptor set + pipeline layouts for each supported binding count.
+-        let mut set_layouts = [vk::DescriptorSetLayout::null(); MAX_BINDINGS + 1];
+-        let mut pipeline_layouts = [vk::PipelineLayout::null(); MAX_BINDINGS + 1];
+         for n in 1..=MAX_BINDINGS {
+             let bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..n)
+                 .map(|i| {
+@@ -409,7 +421,7 @@
+             let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+             let set_layout = unsafe { device.create_descriptor_set_layout(&info, None) }
+                 .map_err(vkerr("create_descriptor_set_layout"))?;
+-            set_layouts[n] = set_layout;
++            rollback.set_layouts[n] = set_layout;
+ 
+             let pc_range = vk::PushConstantRange::default()
+                 .stage_flags(vk::ShaderStageFlags::COMPUTE)
+@@ -420,7 +432,7 @@
+             let info = vk::PipelineLayoutCreateInfo::default()
+                 .set_layouts(&sls)
+                 .push_constant_ranges(&ranges);
+-            pipeline_layouts[n] = unsafe { device.create_pipeline_layout(&info, None) }
++            rollback.pipeline_layouts[n] = unsafe { device.create_pipeline_layout(&info, None) }
+                 .map_err(vkerr("create_pipeline_layout"))?;
+         }
+ 
+@@ -429,6 +441,7 @@
+             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+         let command_pool = unsafe { device.create_command_pool(&pool_info, None) }
+             .map_err(vkerr("create_command_pool"))?;
++        rollback.command_pool = command_pool;
+ 
+         let cb_info = vk::CommandBufferAllocateInfo::default()
+             .command_pool(command_pool)
+@@ -439,6 +452,7 @@
+ 
+         let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default(), None) }
+             .map_err(vkerr("create_fence"))?;
++        rollback.fence = fence;
+ 
+         let pool_sizes = [vk::DescriptorPoolSize::default()
+             .ty(vk::DescriptorType::STORAGE_BUFFER)
+@@ -448,6 +462,7 @@
+             .pool_sizes(&pool_sizes);
+         let descriptor_pool = unsafe { device.create_descriptor_pool(&dp_info, None) }
+             .map_err(vkerr("create_desc_pool"))?;
++        rollback.descriptor_pool = descriptor_pool;
+ 
+         let inner = DeviceInner {
+             entry,
+@@ -458,8 +473,8 @@
+             queue_family_index,
+             mem_props,
+             command_pool,
+-            set_layouts,
+-            pipeline_layouts,
++            set_layouts: rollback.set_layouts,
++            pipeline_layouts: rollback.pipeline_layouts,
+             pipelines: Mutex::new(HashMap::new()),
+             supports_f16,
+             supports_bf16,
+@@ -480,6 +495,7 @@
+             }),
+             device_name,
+         };
++        rollback.armed = false;
+         let _ = inner.pdevice;
+         let _ = inner.queue_family_index;
+         let _ = &inner.entry;
+@@ -535,6 +551,12 @@
+             .sharing_mode(vk::SharingMode::EXCLUSIVE);
+         let buffer =
+             unsafe { self.device.create_buffer(&info, None) }.map_err(vkerr("create_buffer"))?;
++        let mut rollback = BufferRollback {
++            device: &self.device,
++            buffer,
++            memory: vk::DeviceMemory::null(),
++            armed: true,
++        };
+         let req = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+ 
+         // Prefer the unified APU type (device-local + host-visible + coherent),
+@@ -549,7 +571,6 @@
+         let mem_type = match mem_type {
+             Some(m) => m,
+             None => {
+-                unsafe { self.device.destroy_buffer(buffer, None) };
+                 crate::bail!("vulkan: no host-visible coherent memory type available");
+             }
+         };
+@@ -558,12 +579,14 @@
+             vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(mem_type);
+         let memory = unsafe { self.device.allocate_memory(&alloc, None) }
+             .map_err(vkerr("allocate_memory"))?;
++        rollback.memory = memory;
+         unsafe { self.device.bind_buffer_memory(buffer, memory, 0) }
+             .map_err(vkerr("bind_buffer_memory"))?;
+         let ptr = unsafe {
+             self.device.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+         }
+         .map_err(vkerr("map_memory"))? as *mut u8;
++        rollback.armed = false;
+         Ok((buffer, memory, ptr, class))
+     }
+ 
+@@ -580,6 +603,12 @@
+         let module_info = vk::ShaderModuleCreateInfo::default().code(&code);
+         let module = unsafe { self.device.create_shader_module(&module_info, None) }
+             .map_err(vkerr("create_shader_module"))?;
++        let mut rollback = PipelineRollback {
++            device: &self.device,
++            module,
++            pipelines: Vec::new(),
++            armed: true,
++        };
+         let entry = c"main";
+         let stage = vk::PipelineShaderStageCreateInfo::default()
+             .stage(vk::ShaderStageFlags::COMPUTE)
+@@ -588,11 +617,18 @@
+         let info = vk::ComputePipelineCreateInfo::default()
+             .stage(stage)
+             .layout(self.pipeline_layouts[bindings as usize]);
+-        let pipeline = unsafe {
++        match unsafe {
+             self.device.create_compute_pipelines(vk::PipelineCache::null(), &[info], None)
+-        }
+-        .map_err(|(_, e)| vkerr::<vk::Result>("create_compute_pipeline")(e))?[0];
++        } {
++            Ok(created) => rollback.pipelines = created,
++            Err((partial, error)) => {
++                rollback.pipelines = partial;
++                return Err(vkerr("create_compute_pipeline")(error));
++            }
++        }
++        let pipeline = rollback.pipelines[0];
+         pipelines.insert(name.to_string(), CachedPipeline { pipeline, module, bindings });
++        rollback.armed = false;
+         Ok((pipeline, self.pipeline_layouts[bindings as usize], bindings))
+     }
+ 
+--- /dev/null
++++ b/src/vulkan_backend/rollback.rs
+@@ -0,0 +1,114 @@
++use super::MAX_BINDINGS;
++use ash::vk;
++
++// ash wrappers only hold dispatch tables. Until DeviceInner exists, this guard
++// owns the native objects; the entry in the caller keeps the loader alive.
++pub(super) struct DeviceRollback {
++    instance: ash::Instance,
++    pub(super) device: Option<ash::Device>,
++    pub(super) query_pool: vk::QueryPool,
++    pub(super) set_layouts: [vk::DescriptorSetLayout; MAX_BINDINGS + 1],
++    pub(super) pipeline_layouts: [vk::PipelineLayout; MAX_BINDINGS + 1],
++    pub(super) command_pool: vk::CommandPool,
++    pub(super) fence: vk::Fence,
++    pub(super) descriptor_pool: vk::DescriptorPool,
++    pub(super) armed: bool,
++}
++
++impl DeviceRollback {
++    pub(super) fn new(instance: &ash::Instance) -> Self {
++        Self {
++            instance: instance.clone(),
++            device: None,
++            query_pool: vk::QueryPool::null(),
++            set_layouts: [vk::DescriptorSetLayout::null(); MAX_BINDINGS + 1],
++            pipeline_layouts: [vk::PipelineLayout::null(); MAX_BINDINGS + 1],
++            command_pool: vk::CommandPool::null(),
++            fence: vk::Fence::null(),
++            descriptor_pool: vk::DescriptorPool::null(),
++            armed: true,
++        }
++    }
++}
++
++impl Drop for DeviceRollback {
++    fn drop(&mut self) {
++        if !self.armed {
++            return;
++        }
++        unsafe {
++            if let Some(device) = &self.device {
++                if self.descriptor_pool != vk::DescriptorPool::null() {
++                    device.destroy_descriptor_pool(self.descriptor_pool, None);
++                }
++                if self.fence != vk::Fence::null() {
++                    device.destroy_fence(self.fence, None);
++                }
++                if self.command_pool != vk::CommandPool::null() {
++                    // The pool also frees any successfully allocated command buffers.
++                    device.destroy_command_pool(self.command_pool, None);
++                }
++                for n in (1..=MAX_BINDINGS).rev() {
++                    if self.pipeline_layouts[n] != vk::PipelineLayout::null() {
++                        device.destroy_pipeline_layout(self.pipeline_layouts[n], None);
++                    }
++                    if self.set_layouts[n] != vk::DescriptorSetLayout::null() {
++                        device.destroy_descriptor_set_layout(self.set_layouts[n], None);
++                    }
++                }
++                if self.query_pool != vk::QueryPool::null() {
++                    device.destroy_query_pool(self.query_pool, None);
++                }
++                device.destroy_device(None);
++            }
++            self.instance.destroy_instance(None);
++        }
++    }
++}
++
++pub(super) struct BufferRollback<'a> {
++    pub(super) device: &'a ash::Device,
++    pub(super) buffer: vk::Buffer,
++    pub(super) memory: vk::DeviceMemory,
++    pub(super) armed: bool,
++}
++
++impl Drop for BufferRollback<'_> {
++    fn drop(&mut self) {
++        if !self.armed {
++            return;
++        }
++        unsafe {
++            // Memory must outlive the buffer once bound. Freeing memory also
++            // implicitly unmaps it if a later step fails after mapping.
++            self.device.destroy_buffer(self.buffer, None);
++            if self.memory != vk::DeviceMemory::null() {
++                self.device.free_memory(self.memory, None);
++            }
++        }
++    }
++}
++
++pub(super) struct PipelineRollback<'a> {
++    pub(super) device: &'a ash::Device,
++    pub(super) module: vk::ShaderModule,
++    pub(super) pipelines: Vec<vk::Pipeline>,
++    pub(super) armed: bool,
++}
++
++impl Drop for PipelineRollback<'_> {
++    fn drop(&mut self) {
++        if !self.armed {
++            return;
++        }
++        unsafe {
++            // Vulkan may return valid handles mixed with nulls on failure.
++            for &pipeline in self.pipelines.iter().rev() {
++                if pipeline != vk::Pipeline::null() {
++                    self.device.destroy_pipeline(pipeline, None);
++                }
++            }
++            self.device.destroy_shader_module(self.module, None);
++        }
++    }
++}
+--- /dev/null
++++ b/src/vulkan_backend/native_safety_tests.rs
+@@ -0,0 +1,477 @@
++use super::*;
++use ash::vk::Handle;
++use std::cell::RefCell;
++use std::ffi::{c_char, c_void};
++
++#[derive(Default)]
++struct Driver {
++    active: bool,
++    profile: bool,
++    fail_at: Option<usize>,
++    calls: usize,
++    next_handle: u64,
++    created: Vec<(&'static str, u64)>,
++    destroyed: Vec<(&'static str, u64)>,
++    no_devices: bool,
++    no_compute: bool,
++    no_memory: bool,
++    partial_pipeline: bool,
++}
++
++thread_local! {
++    static DRIVER: RefCell<Driver> = RefCell::new(Driver::default());
++}
++
++fn reset() {
++    DRIVER.with(|d| *d.borrow_mut() = Driver { active: true, ..Driver::default() });
++}
++
++struct MockScope;
++
++impl Drop for MockScope {
++    fn drop(&mut self) {
++        DRIVER.with(|d| *d.borrow_mut() = Driver::default());
++    }
++}
++
++pub(super) fn load_entry() -> std::result::Result<ash::Entry, ash::LoadingError> {
++    if !DRIVER.with(|d| d.borrow().active) {
++        return unsafe { ash::Entry::load() };
++    }
++    Ok(unsafe { ash::Entry::from_static_fn(ash::StaticFn { get_instance_proc_addr }) })
++}
++
++pub(super) fn profile_requested(requested: bool) -> bool {
++    DRIVER.with(|d| {
++        let d = d.borrow();
++        if d.active { d.profile } else { requested }
++    })
++}
++
++fn checkpoint() -> vk::Result {
++    DRIVER.with(|d| {
++        let mut d = d.borrow_mut();
++        d.calls += 1;
++        if d.fail_at == Some(d.calls) {
++            vk::Result::ERROR_OUT_OF_HOST_MEMORY
++        } else {
++            vk::Result::SUCCESS
++        }
++    })
++}
++
++fn created(kind: &'static str) -> u64 {
++    DRIVER.with(|d| {
++        let mut d = d.borrow_mut();
++        d.next_handle += 1;
++        let handle = d.next_handle;
++        d.created.push((kind, handle));
++        handle
++    })
++}
++
++fn destroyed(kind: &'static str, handle: u64) {
++    DRIVER.with(|d| d.borrow_mut().destroyed.push((kind, handle)));
++}
++
++fn assert_reverse_cleanup() {
++    DRIVER.with(|d| {
++        let d = d.borrow();
++        let expected: Vec<_> = d.created.iter().rev().copied().collect();
++        assert_eq!(d.destroyed, expected);
++    });
++}
++
++fn new_device(profile: bool) -> Result<Device> {
++    DRIVER.with(|d| d.borrow_mut().profile = profile);
++    Device::new(0)
++}
++
++#[test]
++fn constructor_rolls_back_every_allocation_checkpoint() {
++    let _mock = MockScope;
++    for profile in [false, true] {
++        reset();
++        let device = new_device(profile).unwrap();
++        let calls = DRIVER.with(|d| d.borrow().calls);
++        drop(device);
++        for fail_at in 1..=calls {
++            reset();
++            DRIVER.with(|d| d.borrow_mut().fail_at = Some(fail_at));
++            let result = new_device(profile);
++            assert!(result.is_err(), "checkpoint {fail_at}, profile {profile}");
++            assert_reverse_cleanup();
++        }
++    }
++}
++
++#[test]
++fn constructor_releases_instance_on_selection_errors() {
++    let _mock = MockScope;
++    for no_devices in [false, true] {
++        reset();
++        DRIVER.with(|d| {
++            let mut d = d.borrow_mut();
++            d.no_devices = no_devices;
++            d.no_compute = !no_devices;
++        });
++        assert!(new_device(false).is_err());
++        assert_reverse_cleanup();
++    }
++}
++
++#[test]
++fn successful_constructor_transfers_ownership_once() {
++    let _mock = MockScope;
++    for profile in [false, true] {
++        reset();
++        let device = new_device(profile).unwrap();
++        DRIVER.with(|d| assert!(d.borrow().destroyed.is_empty()));
++        let retained = device.clone();
++        drop(device);
++        DRIVER.with(|d| assert!(d.borrow().destroyed.is_empty()));
++        drop(retained);
++        DRIVER.with(|d| {
++            let d = d.borrow();
++            let mut expected = d.created.clone();
++            let mut actual = d.destroyed.clone();
++            expected.sort_unstable();
++            actual.sort_unstable();
++            assert_eq!(actual, expected);
++            assert_eq!(d.destroyed.last().unwrap().0, "instance");
++            assert_eq!(d.destroyed[d.destroyed.len() - 2].0, "device");
++        });
++    }
++}
++
++#[test]
++fn buffer_failures_release_only_new_resources_in_dependency_order() {
++    let _mock = MockScope;
++    for failure in 0..=4 {
++        reset();
++        let device = new_device(false).unwrap();
++        DRIVER.with(|d| {
++            let mut d = d.borrow_mut();
++            d.created.clear();
++            d.destroyed.clear();
++            d.calls = 0;
++            d.no_memory = failure == 0;
++            d.fail_at = Some(failure);
++        });
++        assert!(device.alloc_buffer(256).is_err(), "buffer failure {failure}");
++        DRIVER.with(|d| {
++            let d = d.borrow();
++            // Bound memory must outlive its buffer, not the other way round.
++            assert_eq!(d.destroyed, d.created);
++        });
++        drop(device);
++    }
++}
++
++#[test]
++fn successful_buffer_transfers_to_recycling_pool() {
++    let _mock = MockScope;
++    reset();
++    let device = new_device(false).unwrap();
++    let (buffer, memory, ptr, class) = device.alloc_buffer(256).unwrap();
++    DRIVER.with(|d| assert!(d.borrow().destroyed.is_empty()));
++    device.defer_free(PooledBuf { buffer, memory, ptr: ptr as usize, class });
++    drop(device);
++    DRIVER.with(|d| {
++        let d = d.borrow();
++        assert_eq!(d.destroyed.iter().filter(|e| e.0 == "buffer").count(), 1);
++        assert_eq!(d.destroyed.iter().filter(|e| e.0 == "memory").count(), 1);
++    });
++}
++
++#[test]
++fn pipeline_errors_destroy_shader_and_partial_non_null_pipelines() {
++    let _mock = MockScope;
++    for failure in 1..=3 {
++        reset();
++        let device = new_device(false).unwrap();
++        DRIVER.with(|d| {
++            let mut d = d.borrow_mut();
++            d.created.clear();
++            d.destroyed.clear();
++            d.calls = 0;
++            d.fail_at = Some(failure.min(2));
++            d.partial_pipeline = failure == 3;
++        });
++        assert!(device.get_pipeline("fill_f32").is_err());
++        assert!(device.pipelines.lock().unwrap().is_empty());
++        assert_reverse_cleanup();
++        // Failed entries must not poison the cache or prevent CPU/GPU retry.
++        DRIVER.with(|d| d.borrow_mut().fail_at = None);
++        assert!(device.get_pipeline("fill_f32").is_ok());
++        drop(device);
++    }
++}
++
++#[test]
++fn successful_pipeline_transfers_to_cache_once() {
++    let _mock = MockScope;
++    reset();
++    let device = new_device(false).unwrap();
++    let first = device.get_pipeline("fill_f32").unwrap();
++    let calls = DRIVER.with(|d| d.borrow().calls);
++    assert_eq!(device.get_pipeline("fill_f32").unwrap(), first);
++    DRIVER.with(|d| {
++        let d = d.borrow();
++        assert_eq!(d.calls, calls);
++        assert!(d.destroyed.is_empty());
++    });
++    drop(device);
++    DRIVER.with(|d| {
++        let d = d.borrow();
++        let cleanup: Vec<_> = d.destroyed.iter()
++            .filter(|e| e.0 == "pipeline" || e.0 == "shader").map(|e| e.0).collect();
++        assert_eq!(cleanup, ["pipeline", "shader"]);
++    });
++}
++
++// These typed Vulkan entry points exercise ash's real Result and partial-output
++// handling. No loader, GPU, environment mutation, or process-global hooks are used.
++macro_rules! create_device_resource {
++    ($name:ident, $info:ident, $handle:ident, $kind:literal) => {
++        unsafe extern "system" fn $name(
++            _: vk::Device, _: *const vk::$info<'_>,
++            _: *const vk::AllocationCallbacks<'_>, out: *mut vk::$handle,
++        ) -> vk::Result {
++            let result = checkpoint();
++            if result == vk::Result::SUCCESS {
++                unsafe { *out = vk::$handle::from_raw(created($kind)); }
++            }
++            result
++        }
++    };
++}
++
++macro_rules! destroy_device_resource {
++    ($name:ident, $handle:ident, $kind:literal) => {
++        unsafe extern "system" fn $name(
++            _: vk::Device, handle: vk::$handle, _: *const vk::AllocationCallbacks<'_>,
++        ) {
++            destroyed($kind, handle.as_raw());
++        }
++    };
++}
++
++create_device_resource!(create_query_pool, QueryPoolCreateInfo, QueryPool, "query");
++create_device_resource!(create_set_layout, DescriptorSetLayoutCreateInfo, DescriptorSetLayout, "set");
++create_device_resource!(create_pipeline_layout, PipelineLayoutCreateInfo, PipelineLayout, "layout");
++create_device_resource!(create_command_pool, CommandPoolCreateInfo, CommandPool, "command");
++create_device_resource!(create_fence, FenceCreateInfo, Fence, "fence");
++create_device_resource!(create_descriptor_pool, DescriptorPoolCreateInfo, DescriptorPool, "descriptor");
++create_device_resource!(create_buffer, BufferCreateInfo, Buffer, "buffer");
++create_device_resource!(allocate_memory, MemoryAllocateInfo, DeviceMemory, "memory");
++create_device_resource!(create_shader_module, ShaderModuleCreateInfo, ShaderModule, "shader");
++destroy_device_resource!(destroy_query_pool, QueryPool, "query");
++destroy_device_resource!(destroy_set_layout, DescriptorSetLayout, "set");
++destroy_device_resource!(destroy_pipeline_layout, PipelineLayout, "layout");
++destroy_device_resource!(destroy_command_pool, CommandPool, "command");
++destroy_device_resource!(destroy_fence, Fence, "fence");
++destroy_device_resource!(destroy_descriptor_pool, DescriptorPool, "descriptor");
++destroy_device_resource!(destroy_buffer, Buffer, "buffer");
++destroy_device_resource!(free_memory, DeviceMemory, "memory");
++destroy_device_resource!(destroy_shader_module, ShaderModule, "shader");
++destroy_device_resource!(destroy_pipeline, Pipeline, "pipeline");
++
++unsafe extern "system" fn create_instance(
++    _: *const vk::InstanceCreateInfo<'_>, _: *const vk::AllocationCallbacks<'_>,
++    out: *mut vk::Instance,
++) -> vk::Result {
++    let result = checkpoint();
++    if result == vk::Result::SUCCESS {
++        unsafe { *out = vk::Instance::from_raw(created("instance")); }
++    }
++    result
++}
++
++unsafe extern "system" fn destroy_instance(
++    instance: vk::Instance, _: *const vk::AllocationCallbacks<'_>,
++) {
++    destroyed("instance", instance.as_raw());
++}
++
++unsafe extern "system" fn enumerate_devices(
++    _: vk::Instance, count: *mut u32, out: *mut vk::PhysicalDevice,
++) -> vk::Result {
++    let result = checkpoint();
++    if result == vk::Result::SUCCESS {
++        unsafe {
++            *count = if DRIVER.with(|d| d.borrow().no_devices) { 0 } else { 1 };
++            if !out.is_null() && *count != 0 { *out = vk::PhysicalDevice::from_raw(1); }
++        }
++    }
++    result
++}
++
++unsafe extern "system" fn get_properties(
++    _: vk::PhysicalDevice, out: *mut vk::PhysicalDeviceProperties,
++) {
++    unsafe {
++        *out = vk::PhysicalDeviceProperties::default();
++        (*out).device_type = vk::PhysicalDeviceType::DISCRETE_GPU;
++        (*out).limits.timestamp_period = 1.0;
++    }
++}
++
++unsafe extern "system" fn get_queue_properties(
++    _: vk::PhysicalDevice, count: *mut u32, out: *mut vk::QueueFamilyProperties,
++) {
++    unsafe {
++        *count = 1;
++        if !out.is_null() {
++            *out = vk::QueueFamilyProperties::default();
++            (*out).timestamp_valid_bits = 64;
++            (*out).queue_count = 1;
++            if !DRIVER.with(|d| d.borrow().no_compute) {
++                (*out).queue_flags = vk::QueueFlags::COMPUTE;
++            }
++        }
++    }
++}
++
++unsafe extern "system" fn get_features(_: vk::PhysicalDevice, _: *mut vk::PhysicalDeviceFeatures2<'_>) {}
++
++unsafe extern "system" fn enumerate_extensions(
++    _: vk::PhysicalDevice, _: *const c_char, count: *mut u32, _: *mut vk::ExtensionProperties,
++) -> vk::Result {
++    unsafe { *count = 0; }
++    vk::Result::SUCCESS
++}
++
++unsafe extern "system" fn create_device(
++    _: vk::PhysicalDevice, _: *const vk::DeviceCreateInfo<'_>,
++    _: *const vk::AllocationCallbacks<'_>, out: *mut vk::Device,
++) -> vk::Result {
++    let result = checkpoint();
++    if result == vk::Result::SUCCESS {
++        unsafe { *out = vk::Device::from_raw(created("device")); }
++    }
++    result
++}
++
++unsafe extern "system" fn destroy_device(device: vk::Device, _: *const vk::AllocationCallbacks<'_>) {
++    destroyed("device", device.as_raw());
++}
++
++unsafe extern "system" fn get_queue(_: vk::Device, _: u32, _: u32, out: *mut vk::Queue) {
++    unsafe { *out = vk::Queue::from_raw(1); }
++}
++
++unsafe extern "system" fn get_memory_properties(
++    _: vk::PhysicalDevice, out: *mut vk::PhysicalDeviceMemoryProperties,
++) {
++    unsafe {
++        *out = vk::PhysicalDeviceMemoryProperties::default();
++        (*out).memory_type_count = 1;
++        (*out).memory_types[0].property_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL
++            | vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
++    }
++}
++
++unsafe extern "system" fn allocate_command_buffers(
++    _: vk::Device, _: *const vk::CommandBufferAllocateInfo<'_>, out: *mut vk::CommandBuffer,
++) -> vk::Result {
++    let result = checkpoint();
++    // Command buffers are owned/freed by their command pool.
++    if result == vk::Result::SUCCESS {
++        unsafe { *out = vk::CommandBuffer::from_raw(1); }
++    }
++    result
++}
++
++unsafe extern "system" fn wait_idle(_: vk::Device) -> vk::Result { vk::Result::SUCCESS }
++
++unsafe extern "system" fn get_buffer_requirements(
++    _: vk::Device, _: vk::Buffer, out: *mut vk::MemoryRequirements,
++) {
++    unsafe {
++        *out = vk::MemoryRequirements { size: 256, alignment: 1,
++            memory_type_bits: if DRIVER.with(|d| d.borrow().no_memory) { 0 } else { 1 } };
++    }
++}
++
++unsafe extern "system" fn bind_buffer_memory(
++    _: vk::Device, _: vk::Buffer, _: vk::DeviceMemory, _: vk::DeviceSize,
++) -> vk::Result { checkpoint() }
++
++unsafe extern "system" fn map_memory(
++    _: vk::Device, _: vk::DeviceMemory, _: vk::DeviceSize, _: vk::DeviceSize,
++    _: vk::MemoryMapFlags, out: *mut *mut c_void,
++) -> vk::Result {
++    let result = checkpoint();
++    if result == vk::Result::SUCCESS {
++        // Tests never dereference this mapped pointer.
++        unsafe { *out = std::ptr::NonNull::<u8>::dangling().as_ptr().cast(); }
++    }
++    result
++}
++
++unsafe extern "system" fn create_compute_pipelines(
++    _: vk::Device, _: vk::PipelineCache, count: u32,
++    _: *const vk::ComputePipelineCreateInfo<'_>, _: *const vk::AllocationCallbacks<'_>,
++    out: *mut vk::Pipeline,
++) -> vk::Result {
++    let result = checkpoint();
++    for i in 0..count as usize {
++        let handle = if result == vk::Result::SUCCESS || DRIVER.with(|d| d.borrow().partial_pipeline) {
++            vk::Pipeline::from_raw(created("pipeline"))
++        } else {
++            vk::Pipeline::null()
++        };
++        unsafe { *out.add(i) = handle; }
++    }
++    result
++}
++
++unsafe extern "system" fn get_device_proc_addr(_: vk::Device, name: *const c_char) -> vk::PFN_vkVoidFunction {
++    unsafe { get_instance_proc_addr(vk::Instance::null(), name) }
++}
++
++unsafe extern "system" fn get_instance_proc_addr(_: vk::Instance, name: *const c_char) -> vk::PFN_vkVoidFunction {
++    let name = unsafe { CStr::from_ptr(name) }.to_bytes();
++    let function = match name {
++        b"vkCreateInstance" => create_instance as *const (),
++        b"vkDestroyInstance" => destroy_instance as *const (),
++        b"vkEnumeratePhysicalDevices" => enumerate_devices as *const (),
++        b"vkGetPhysicalDeviceProperties" => get_properties as *const (),
++        b"vkGetPhysicalDeviceQueueFamilyProperties" => get_queue_properties as *const (),
++        b"vkGetPhysicalDeviceFeatures2" => get_features as *const (),
++        b"vkEnumerateDeviceExtensionProperties" => enumerate_extensions as *const (),
++        b"vkCreateDevice" => create_device as *const (),
++        b"vkDestroyDevice" => destroy_device as *const (),
++        b"vkGetDeviceProcAddr" => get_device_proc_addr as *const (),
++        b"vkGetDeviceQueue" => get_queue as *const (),
++        b"vkGetPhysicalDeviceMemoryProperties" => get_memory_properties as *const (),
++        b"vkCreateQueryPool" => create_query_pool as *const (),
++        b"vkDestroyQueryPool" => destroy_query_pool as *const (),
++        b"vkCreateDescriptorSetLayout" => create_set_layout as *const (),
++        b"vkDestroyDescriptorSetLayout" => destroy_set_layout as *const (),
++        b"vkCreatePipelineLayout" => create_pipeline_layout as *const (),
++        b"vkDestroyPipelineLayout" => destroy_pipeline_layout as *const (),
++        b"vkCreateCommandPool" => create_command_pool as *const (),
++        b"vkDestroyCommandPool" => destroy_command_pool as *const (),
++        b"vkAllocateCommandBuffers" => allocate_command_buffers as *const (),
++        b"vkCreateFence" => create_fence as *const (),
++        b"vkDestroyFence" => destroy_fence as *const (),
++        b"vkCreateDescriptorPool" => create_descriptor_pool as *const (),
++        b"vkDestroyDescriptorPool" => destroy_descriptor_pool as *const (),
++        b"vkDeviceWaitIdle" => wait_idle as *const (),
++        b"vkCreateBuffer" => create_buffer as *const (),
++        b"vkDestroyBuffer" => destroy_buffer as *const (),
++        b"vkGetBufferMemoryRequirements" => get_buffer_requirements as *const (),
++        b"vkAllocateMemory" => allocate_memory as *const (),
++        b"vkFreeMemory" => free_memory as *const (),
++        b"vkBindBufferMemory" => bind_buffer_memory as *const (),
++        b"vkMapMemory" => map_memory as *const (),
++        b"vkCreateShaderModule" => create_shader_module as *const (),
++        b"vkDestroyShaderModule" => destroy_shader_module as *const (),
++        b"vkCreateComputePipelines" => create_compute_pipelines as *const (),
++        b"vkDestroyPipeline" => destroy_pipeline as *const (),
++        _ => return None,
++    };
++    unsafe { Some(std::mem::transmute::<*const (), unsafe extern "system" fn()>(function)) }
++}

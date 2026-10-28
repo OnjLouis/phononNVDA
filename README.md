@@ -1,10 +1,17 @@
 # Phonon for NVDA
 
 Offline speech using Gradium's multilingual Phonon engine. Includes 102 voices
-for English, French, German, Spanish and Portuguese. No Ollama server, GPU,
-separate synthesizer add-on or first-use download is required.
+for English, French, German, Spanish and Portuguese. The model and voices are
+included, with no first-use download required.
 
 ## Changelog
+
+### 1.0
+
+- Optional GPU acceleration through Vulkan, with automatic CPU fallback during initialization.
+- Lower CPU usage when acceleration is off, without changing other add-ons' thread settings.
+- Removed the redundant model status and Use Phonon controls.
+- Simplified this manual for standalone use.
 
 ### 0.1.0
 
@@ -19,11 +26,9 @@ Requires 64-bit NVDA 2026.2 or later, Windows 10 or later and an AVX2-capable
 processor. Older processors and 32-bit NVDA cannot load this runtime.
 
 Install the add-on and restart NVDA. Open the synthesizer selection dialog with
-NVDA+Control+S and choose Phonon. Alternatively, open NVDA Settings, Phonon and
-choose Use Phonon. The model and voices are included in the package.
+NVDA+Control+S and choose Phonon. The model and voices are included in the package.
 
-Phonon and Ollama Speech are separate add-ons and can coexist. Installing this
-add-on does not change your Ollama Speech connection or settings.
+Alternative: [Ollama Speech](https://github.com/OnjLouis/ollamaSpeech).
 
 ## Speech Controls
 
@@ -38,13 +43,23 @@ Control stops speech. The engine finishes its current calculation before
 starting replacement speech, so responsiveness depends on the processor.
 
 If the native engine fails, the active driver switches to eSpeak NG to preserve
-access. Keep a familiar alternative synthesizer available while testing.
+access. Keep a familiar alternative synthesizer available.
 
 ## Settings and Updates
 
-The Phonon settings panel contains Use Phonon, Check for updates, Check for
-updates now and Help. Update intervals are Never, Hourly or Daily; Daily is the
+The Phonon settings panel contains GPU acceleration, Check for updates, Check
+for updates now and Help. Update intervals are Never, Hourly or Daily; Daily is the
 default. Help opens this manual. No Tools-menu shortcut is added.
+
+**Use GPU acceleration when available** is off by default. Enable it to use a
+compatible NVIDIA, AMD or Intel graphics device through its installed Vulkan
+driver. No CUDA toolkit is required. Performance depends on the device; disable
+it if CPU speech works better. After changing this option, switch to another
+synthesizer and back to Phonon, or restart NVDA.
+
+The engine tests GPU synthesis before using it. If initialization fails, it uses
+the CPU instead and records the reason in the NVDA log. This fallback does not
+download or install a graphics driver. CPU speech remains available without a GPU.
 
 Updates require a valid Phonon signature and matching package identity, version,
 size and hash. Downloads are staged outside the add-ons folder and installed by
@@ -54,7 +69,7 @@ kept.
 ## Privacy
 
 Speech is generated on this computer. Spoken text and audio are not saved or
-sent to a server. Only update checks and approved update downloads use the
+sent over the network. Only update checks and approved update downloads use the
 network. Automatic update checks can be disabled.
 
 ## Credits and Licences
@@ -68,7 +83,7 @@ Audio controls use NVDA's bundled Sonic by Bill Cox.
 Add-on code is GPL-2.0-or-later. The runtime is MIT OR Apache-2.0, the voice
 catalogue is Apache-2.0, and the
 [40M multilingual model](https://huggingface.co/gradium/phonon-40m-multilingual)
-is CC BY-NC 4.0. The original multilingual tensors were repackaged for the CPU
+is CC BY-NC 4.0. The original multilingual tensors were repackaged for the native
 runtime, not retrained. Original licence texts and native dependency notices are
 included in the installed manual's Licenses folder. This is an independent
 project, not an official or endorsed Gradium product.

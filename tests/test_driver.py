@@ -66,7 +66,8 @@ class Config(dict):
     spec = {}
 
 
-config = types.SimpleNamespace(conf=Config(audio={"outputDevice": "fixture"}, speech={"phononLocal": {"pitch": 50}}))
+config = types.SimpleNamespace(conf=Config(audio={"outputDevice": "fixture"}, speech={"phononLocal": {"pitch": 50}},
+    phononLocalEngine={"useGpu": False}))
 notice, done = Notice(), Notice()
 handler = types.SimpleNamespace(SynthDriver=Base, VoiceInfo=lambda id, name, language=None:
     types.SimpleNamespace(id=id, displayName=name, language=language),
@@ -90,7 +91,9 @@ class FakeEngine:
     started = threading.Event()
     closed = []
 
-    def __init__(self): self.owner = threading.get_ident()
+    def __init__(self, use_gpu=False):
+        self.owner = threading.get_ident()
+        self.backend = 'GPU (Vulkan)' if use_gpu else 'CPU'
     def speak(self, text, voice, locale, cancel, sink):
         self.calls.append((text, voice, locale))
         if text == "block":
@@ -192,6 +195,36 @@ class DriverTests(unittest.TestCase):
     def test_invalid_saved_filter_falls_back_to_all(self):
         self.driver.locale = "invalid"
         self.assertEqual(self.driver.locale, "all")
+
+    def test_new_driver_is_safe_while_old_worker_finishes_after_shutdown_wait(self):
+        entered, release = threading.Event(), threading.Event()
+        original = FakeEngine.speak
+        def slow(engine, text, voice, locale, cancel, sink):
+            if text == 'slow native request':
+                entered.set()
+                release.wait(4)
+            original(engine, text, voice, locale, cancel, sink)
+        with patch.object(FakeEngine, 'speak', slow):
+            self.driver.speak(['slow native request', commands.IndexCommand(10)])
+            self.assertTrue(entered.wait(1))
+            self.driver.terminate()
+            self.assertTrue(self.driver._worker.is_alive())
+            replacement = driver_module.SynthDriver()
+            try:
+                replacement.speak(['replacement', commands.IndexCommand(99)])
+                wait_for(lambda: len(replacement._player.callbacks) == 2)
+                replacement._player.drain()
+                self.assertEqual([item['index'] for item in notice.items], [99])
+                release.set()
+                self.driver._worker.join(2)
+                self.assertFalse(self.driver._worker.is_alive())
+                self.assertFalse(self.driver._player.audio)
+                self.assertFalse(replacement._player.closed)
+                self.assertEqual([item['index'] for item in notice.items], [99])
+            finally:
+                release.set()
+                self.driver._worker.join(2)
+                replacement.terminate()
 
 
 if __name__ == "__main__": unittest.main()

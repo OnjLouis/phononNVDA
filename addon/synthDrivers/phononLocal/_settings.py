@@ -15,3 +15,15 @@ def save_interval(value):
         raise ValueError("Unknown update interval")
     update_interval()
     config.conf["phononLocalUpdates"]["interval"] = value
+
+
+def use_gpu():
+    config.conf.spec['phononLocalEngine'] = {'useGpu': 'boolean(default=False)'}
+    return config.conf['phononLocalEngine'].get('useGpu', False) is True
+
+
+def save_use_gpu(value):
+    if not isinstance(value, bool):
+        raise ValueError('GPU acceleration must be enabled or disabled')
+    use_gpu()
+    config.conf['phononLocalEngine']['useGpu'] = value
