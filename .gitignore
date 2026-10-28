@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+addon/data/
+addon/synthDrivers/phononLocal/bin/
+*.nvda-addon

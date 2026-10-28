@@ -1,0 +1,119 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Serialized access to Gradium's CPU C API; no network or audio-device access."""
+import ctypes as C
+import os
+from pathlib import Path
+import sys
+import threading
+
+SAMPLE_RATE = 24000
+MAX_INPUT = 4096
+LANGUAGES = frozenset(("en", "fr", "de", "es", "pt"))
+MODEL = Path(__file__).resolve().parents[2] / "data" / "phonon"
+BIN = Path(__file__).resolve().parent / "bin"
+FRAME = C.CFUNCTYPE(C.c_bool, C.POINTER(C.c_float), C.c_size_t, C.c_void_p)
+_DLL = None
+_DLL_LOCK = threading.Lock()
+
+
+class NativeError(RuntimeError):
+    pass
+
+
+class Result(C.Structure):
+    _fields_ = [("frames", C.c_uint32), ("samples", C.c_size_t),
+                ("ttfa_ms", C.c_double), ("total_ms", C.c_double)]
+
+
+def supported():
+    return (sys.platform == "win32" and C.sizeof(C.c_void_p) == 8
+            and bool(C.windll.kernel32.IsProcessorFeaturePresent(40)))
+
+
+def available():
+    return supported() and all(path.is_file() for path in (
+        BIN / "ptts_ffi.dll", BIN / "libunwind.dll", MODEL / "config.json",
+        MODEL / "tokenizer.json", MODEL / "model.safetensors"))
+
+
+def language(code):
+    value = (code or "en").replace("-", "_").split("_", 1)[0].lower()
+    return value if value in LANGUAGES else "en"
+
+
+def _library():
+    global _DLL
+    with _DLL_LOCK:
+        if _DLL is not None:
+            return _DLL
+        with os.add_dll_directory(str(BIN)):
+            library = C.CDLL(str(BIN / "ptts_ffi.dll"))
+        for name, result, arguments in (
+            ("ptts_new", C.c_void_p, [C.c_char_p, C.c_uint32, C.c_char_p]),
+            ("ptts_speak", C.c_bool, [C.c_void_p, C.c_char_p, FRAME, C.c_void_p, C.POINTER(Result)]),
+            ("ptts_set_voice", C.c_bool, [C.c_void_p, C.c_char_p]),
+            ("ptts_set_language", C.c_bool, [C.c_void_p, C.c_char_p]),
+            ("ptts_last_error", C.c_char_p, [C.c_void_p]),
+            ("ptts_free", None, [C.c_void_p]),
+        ):
+            function = getattr(library, name)
+            function.restype, function.argtypes = result, arguments
+        # The DLL's shared worker pool outlives individual model handles.
+        _DLL = library
+        return library
+
+
+class Engine:
+    def __init__(self, model=MODEL):
+        self._owner = threading.get_ident()
+        self._handle = None
+        if not supported():
+            raise NativeError("Phonon requires 64-bit NVDA and an AVX2-capable processor.")
+        try:
+            self._dll = _library()
+            self._handle = self._dll.ptts_new(str(model).encode("utf-8"), 0, b"en")
+            if not self._handle:
+                raise NativeError("Phonon could not load its bundled model.")
+        except BaseException:
+            self.close()
+            raise
+
+    def _check_owner(self):
+        if threading.get_ident() != self._owner:
+            raise RuntimeError("Phonon's engine must be used only by its speech worker.")
+
+    def speak(self, text, voice, locale, cancel, sink):
+        self._check_owner()
+        if cancel.is_set():
+            return None
+        if not self._handle or not text or len(text) > MAX_INPUT or "\0" in text:
+            raise NativeError("The Phonon speech request is invalid.")
+        if not self._dll.ptts_set_voice(self._handle, voice.encode("utf-8")):
+            raise NativeError("Phonon could not select the requested voice.")
+        if not self._dll.ptts_set_language(self._handle, language(locale).encode("ascii")):
+            raise NativeError("Phonon could not select the requested language.")
+        failure = []
+
+        @FRAME
+        def callback(pcm, count, user):
+            if cancel.is_set():
+                return False
+            try:
+                return bool(sink(pcm, count)) and not cancel.is_set()
+            except Exception as error:
+                failure.append(error)
+                return False
+
+        result = Result()
+        success = self._dll.ptts_speak(self._handle, text.encode("utf-8"), callback, None, C.byref(result))
+        if failure:
+            raise failure[0]
+        if not success and not cancel.is_set():
+            raise NativeError("Phonon's native engine could not generate this utterance.")
+        return result
+
+    def close(self):
+        self._check_owner()
+        if self._handle:
+            self._dll.ptts_free(self._handle)
+            self._handle = None
