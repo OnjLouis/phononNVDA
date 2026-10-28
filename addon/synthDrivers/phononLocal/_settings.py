@@ -18,8 +18,8 @@ def save_interval(value):
 
 
 def use_gpu():
-    config.conf.spec['phononLocalEngine'] = {'useGpu': 'boolean(default=False)'}
-    return config.conf['phononLocalEngine'].get('useGpu', False) is True
+    config.conf.spec['phononLocalEngine'] = {'useGpu': 'boolean(default=True)'}
+    return config.conf['phononLocalEngine'].get('useGpu', True) is True
 
 
 def save_use_gpu(value):

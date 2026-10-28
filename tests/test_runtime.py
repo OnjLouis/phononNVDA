@@ -82,6 +82,11 @@ class InitializingDLL(DLL):
 
 
 class BackendTests(unittest.TestCase):
+    def setUp(self):
+        state = patch.object(runtime, '_GPU_UNAVAILABLE', False, create=True)
+        state.start()
+        self.addCleanup(state.stop)
+
     def open(self, dll, gpu=False, loader_error=None):
         with patch.object(runtime, 'supported', return_value=True), \
                 patch.object(runtime, '_library', return_value=dll), \
@@ -129,6 +134,17 @@ class BackendTests(unittest.TestCase):
                 patch.object(runtime, '_library', return_value=InitializingDLL(handles=(0,))):
             with self.assertRaisesRegex(runtime.NativeError, 'fixture backend unavailable'):
                 runtime.Engine()
+
+    def test_unavailable_gpu_is_logged_once_and_not_retried(self):
+        dll = InitializingDLL(handles=(0, 2, 3))
+        with patch.object(runtime.log, 'info') as info, patch.object(runtime.log, 'warning') as warning:
+            first, _ = self.open(dll, gpu=True)
+            second, loader = self.open(dll, gpu=True)
+        self.assertEqual((first.backend, second.backend), ('CPU', 'CPU'))
+        self.assertEqual(dll.units, [3, 0, 0])
+        loader.assert_not_called()
+        info.assert_called_once()
+        warning.assert_not_called()
 
 
 if __name__ == '__main__': unittest.main()

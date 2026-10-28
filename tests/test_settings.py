@@ -107,6 +107,15 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.module._settings.save_use_gpu('false')
 
+    def test_missing_preference_defaults_to_gpu_without_overriding_opt_out(self):
+        fixture.config.conf['phononLocalEngine'].pop('useGpu')
+        panel = self.module.PhononSettingsPanel()
+        panel.makeSettings(object())
+        self.assertTrue(panel.gpu.GetValue())
+        self.assertEqual(fixture.config.conf.spec['phononLocalEngine']['useGpu'], 'boolean(default=True)')
+        self.module._settings.save_use_gpu(False)
+        self.assertFalse(self.module._settings.use_gpu())
+
     def test_check_now_button_dispatches_only_when_updater_exists(self):
         handler = self.panel.check.bindings["button"]
         handler(None)

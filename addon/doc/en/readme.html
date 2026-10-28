@@ -6,14 +6,8 @@ included, with no first-use download required.</p>
 <h2>Changelog</h2>
 <h3>1.0</h3>
 <ul>
-<li>Optional GPU acceleration through Vulkan, with automatic CPU fallback during initialization.</li>
-<li>Lower CPU usage when acceleration is off, without changing other add-ons' thread settings.</li>
-<li>Removed the redundant model status and Use Phonon controls.</li>
-<li>Simplified this manual for standalone use.</li>
-</ul>
-<h3>0.1.0</h3>
-<ul>
-<li>Initial preview with bundled multilingual model and catalogue voices.</li>
+<li>Bundled multilingual model and 102 voices, ready to use after installation.</li>
+<li>Automatic GPU acceleration through Vulkan, with quiet CPU fallback.</li>
 <li>NVDA audio output, Language filter, Voice, Rate, Rate boost, Pitch and Volume.</li>
 <li>Playback-timed indexing, spelling, Say All, pause and interruption handling.</li>
 <li>Settings panel with Help and signed-update controls.</li>
@@ -38,15 +32,16 @@ access. Keep a familiar alternative synthesizer available.</p>
 <h2>Settings and Updates</h2>
 <p>The Phonon settings panel contains GPU acceleration, Check for updates, Check
 for updates now and Help. Update intervals are Never, Hourly or Daily; Daily is the
-default. Help opens this manual. No Tools-menu shortcut is added.</p>
-<p><strong>Use GPU acceleration when available</strong> is off by default. Enable it to use a
+default. Help opens this manual.</p>
+<p><strong>Use GPU acceleration when available</strong> is checked by default. Phonon uses a
 compatible NVIDIA, AMD or Intel graphics device through its installed Vulkan
 driver. No CUDA toolkit is required. Performance depends on the device; disable
 it if CPU speech works better. After changing this option, switch to another
 synthesizer and back to Phonon, or restart NVDA.</p>
-<p>The engine tests GPU synthesis before using it. If initialization fails, it uses
-the CPU instead and records the reason in the NVDA log. This fallback does not
-download or install a graphics driver. CPU speech remains available without a GPU.</p>
+<p>Phonon tests GPU synthesis before using it. If initialization fails, it quietly
+uses the CPU, without a popup or spoken warning. The reason is recorded once in
+the NVDA log, and GPU initialization is not retried until NVDA restarts. No
+graphics driver is downloaded or installed. CPU speech remains available without a GPU.</p>
 <p>Updates require a valid Phonon signature and matching package identity, version,
 size and hash. Downloads are staged outside the add-ons folder and installed by
 NVDA after your approval. Restart NVDA when prompted. Saved speech settings are

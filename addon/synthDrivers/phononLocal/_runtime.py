@@ -20,6 +20,8 @@ FRAME = C.CFUNCTYPE(C.c_bool, C.POINTER(C.c_float), C.c_size_t, C.c_void_p)
 _DLL = None
 _DLL_LOCK = threading.Lock()
 _VULKAN = None
+_GPU_INIT_LOCK = threading.Lock()
+_GPU_UNAVAILABLE = False
 
 
 def _vulkan_loader():
@@ -79,6 +81,7 @@ def _library():
 
 class Engine:
     def __init__(self, model=MODEL, use_gpu=False):
+        global _GPU_UNAVAILABLE
         self._owner = threading.get_ident()
         self._handle = None
         self.backend = 'CPU'
@@ -87,14 +90,17 @@ class Engine:
         try:
             self._dll = _library()
             if use_gpu:
-                try:
-                    _vulkan_loader()
-                    self._open(model, UNIT_VULKAN)
-                    self._prime_gpu()
-                    self.backend = 'GPU (Vulkan)'
-                except (OSError, NativeError) as error:
-                    self.close()
-                    log.warning('Phonon GPU initialization failed; using CPU: %s', error)
+                with _GPU_INIT_LOCK:
+                    if not _GPU_UNAVAILABLE:
+                        try:
+                            _vulkan_loader()
+                            self._open(model, UNIT_VULKAN)
+                            self._prime_gpu()
+                            self.backend = 'GPU (Vulkan)'
+                        except (OSError, NativeError) as error:
+                            self.close()
+                            _GPU_UNAVAILABLE = True
+                            log.info('Phonon GPU unavailable; using CPU for this session: %s', error)
             if not self._handle:
                 self._open(model, UNIT_CPU)
         except BaseException:
