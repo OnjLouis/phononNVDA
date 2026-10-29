@@ -111,6 +111,38 @@ class Processor:
     def finish(self): return b""
 
 
+class VoiceChoice:
+    def __init__(self, voices):
+        self.items = [voice.displayName for voice in voices]
+        self.selection = 0
+        self.refreshes = 0
+
+    def SetItems(self, items):
+        self.items = list(items)
+        self.refreshes += 1
+
+    def SetSelection(self, index):
+        self.selection = index
+
+
+class VoicePanel:
+    def __init__(self, driver):
+        self.driver = driver
+        self._voices = list(driver.availableVoices.values())
+        self.voiceList = VoiceChoice(self._voices)
+        self.deleted = False
+
+    def getSettings(self): return self.driver
+    def IsBeingDeleted(self): return self.deleted
+    def GetParent(self): return None
+
+    def updateDriverSettings(self, changedSetting=None):
+        # NVDA updates the selection from this cache, not availableVoices.
+        ids = [voice.id for voice in self._voices]
+        if self.driver.voice in ids:
+            self.voiceList.SetSelection(ids.index(self.driver.voice))
+
+
 def wait_for(predicate):
     end = time.monotonic() + 3
     while not predicate():
@@ -124,7 +156,7 @@ class DriverTests(unittest.TestCase):
         self.addCleanup(self.folder.cleanup)
         root = Path(self.folder.name)
         (root / "voices").mkdir()
-        for name in ("Freya", "Zoey", "Nele", "Noa"):
+        for name in ("Freya", "Pippa", "Zoey", "Juniper", "Nele", "Noa"):
             (root / "voices" / (name + ".safetensors")).touch()
         for name, value in (("MODEL", root), ("available", lambda: True), ("Engine", FakeEngine), ("Processor", Processor)):
             patched = patch.object(driver_module, name, value)
@@ -169,6 +201,43 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.driver.voice, "Nele")
         self.assertEqual(self.driver.language, "de_DE")
         self.assertNotIn("model", [getattr(s, "id", None) for s in self.driver.supportedSettings])
+
+    def test_reopened_speech_panel_refreshes_voice_choices_after_filter_change(self):
+        self.driver.locale = 'en_GB'
+        panel = VoicePanel(self.driver)
+        pending = []
+        gui = types.ModuleType('gui')
+        dialogs = types.ModuleType('gui.settingsDialogs')
+        dialogs.VoiceSettingsPanel = VoicePanel
+        gui.settingsDialogs = dialogs
+        modules = {'gui': gui, 'gui.settingsDialogs': dialogs,
+            'wx': types.SimpleNamespace(CallAfter=lambda fn: pending.append(fn),
+                Window=types.SimpleNamespace(FindFocus=lambda: panel))}
+        with patch.dict(sys.modules, modules), patch.object(handler, 'getSynth', lambda: self.driver), \
+                patch.object(handler, 'changeVoice', lambda *args: None, create=True):
+            self.driver.locale = 'en_US'
+            self.assertEqual(len(pending), 1)
+            pending.pop()()
+            self.assertEqual([voice.id for voice in panel._voices], ['Zoey', 'Juniper'])
+            self.assertEqual(panel.voiceList.items, ['Zoey', 'Juniper'])
+            self.assertEqual(panel._voices[panel.voiceList.selection].id, self.driver.voice)
+            self.driver.voice = panel._voices[1].id
+            self.assertEqual(self.driver.voice, 'Juniper')
+
+    def test_speech_panel_does_not_rebuild_unchanged_voice_choices(self):
+        self.driver.locale = 'en_US'
+        panel = VoicePanel(self.driver)
+        gui = types.ModuleType('gui')
+        dialogs = types.ModuleType('gui.settingsDialogs')
+        dialogs.VoiceSettingsPanel = VoicePanel
+        gui.settingsDialogs = dialogs
+        modules = {'gui': gui, 'gui.settingsDialogs': dialogs,
+            'wx': types.SimpleNamespace(Window=types.SimpleNamespace(FindFocus=lambda: panel))}
+        with patch.dict(sys.modules, modules), patch.object(handler, 'getSynth', lambda: self.driver), \
+                patch.object(handler, 'changeVoice', lambda *args: None, create=True):
+            self.driver._refreshControls()
+            self.driver._refreshControls()
+        self.assertEqual(panel.voiceList.refreshes, 0)
 
     def test_language_command_and_restore(self):
         self.driver.speak([commands.LangChangeCommand(lang="fr_FR"), "bonjour", commands.LangChangeCommand(lang=None), "hello"])

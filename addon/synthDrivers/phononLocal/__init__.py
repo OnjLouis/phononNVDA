@@ -117,6 +117,11 @@ class SynthDriver(BaseSynth):
         while window is not None:
             if isinstance(window, gui.settingsDialogs.VoiceSettingsPanel):
                 if not window.IsBeingDeleted() and window.getSettings() is self:
+                    voices = list(self.availableVoices.values())
+                    # NVDA updates selections but retains its original choices.
+                    if [(v.id, v.displayName) for v in window._voices] != [(v.id, v.displayName) for v in voices]:
+                        window._voices = voices
+                        window.voiceList.SetItems([v.displayName for v in voices])
                     window.updateDriverSettings(changedSetting="locale")
                 return
             window = window.GetParent()

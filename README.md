@@ -6,6 +6,10 @@ included, with no first-use download required.
 
 ## Changelog
 
+### 1.0.1
+
+- Fixed the Voice list retaining voices from the previous Language filter in NVDA Speech settings. The choices and selected voice now update together, including after reopening settings. Cancel still restores the previous settings.
+
 ### 1.0
 
 - Bundled multilingual model and 102 voices, ready to use after installation.
