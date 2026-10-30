@@ -8,6 +8,7 @@ import gui
 import gui.guiHelper
 import gui.settingsDialogs
 import wx
+import synthDriverHandler
 
 from synthDrivers.phononLocal import _settings
 from ._updater import GitHubReleaseUpdater
@@ -23,6 +24,15 @@ class PhononSettingsPanel(gui.settingsDialogs.SettingsPanel):
         helper = gui.guiHelper.BoxSizerHelper(self, sizer=settingsSizer)
         self.gpu = helper.addItem(wx.CheckBox(self, label=_("Use &GPU acceleration when available")))
         self.gpu.SetValue(_settings.use_gpu())
+        # Windows skips read-only single-line text controls during Tab navigation.
+        self.backend = helper.addLabeledControl(_("Synthesis &backend:"), wx.TextCtrl,
+                                               style=wx.TE_READONLY | wx.TE_MULTILINE)
+        self.backend.SetName(_("Synthesis backend"))
+        self.backend.SetValue("")
+        self.refreshBackend()
+        self._backendTimer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self.refreshBackend, self._backendTimer)
+        self.Bind(wx.EVT_WINDOW_DESTROY, self.onBackendDestroy)
         self.interval = helper.addLabeledControl(_("Check for &updates:"), wx.Choice,
                                                choices=[_("Never"), _("Hourly"), _("Daily")])
         self.interval.SetName(_("Check for updates"))
@@ -38,6 +48,36 @@ class PhononSettingsPanel(gui.settingsDialogs.SettingsPanel):
         _settings.save_interval(value)
         if _updater is not None:
             _updater.setInterval(value)
+
+    def refreshBackend(self, event=None):
+        synth = synthDriverHandler.getSynth()
+        if synth is None or getattr(synth, "name", "") != "phononLocal":
+            text = _("Phonon is not running; backend has not been tested.")
+        else:
+            text = {
+                "starting": _("Initializing Phonon."),
+                "gpu": _("GPU (Vulkan)."),
+                "cpu": _("CPU (GPU disabled)."),
+                "cpu-fallback": _("CPU fallback (GPU initialization unavailable)."),
+                "failed": _("Phonon initialization or synthesis failed."),
+                "stopped": _("Phonon is stopped."),
+            }.get(getattr(synth, "backendStatus", "unknown"), _("Current engine has not reported its backend."))
+        if self.backend.GetValue() != text:
+            self.backend.SetValue(text)
+
+    def onPanelActivated(self):
+        super().onPanelActivated()
+        self.refreshBackend()
+        self._backendTimer.Start(1000)
+
+    def onPanelDeactivated(self):
+        self._backendTimer.Stop()
+        super().onPanelDeactivated()
+
+    def onBackendDestroy(self, event):
+        if event.GetEventObject() is self:
+            self._backendTimer.Stop()
+        event.Skip()
 
     def onCheck(self, event):
         if _updater is not None:

@@ -175,6 +175,30 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(notice.items[0]["index"], 2)
         self.assertEqual(len(done.items), 1)
 
+    def test_backend_status_reports_initialized_cpu(self):
+        self.assertTrue(hasattr(self.driver, "backendStatus"))
+        wait_for(lambda: self.driver.backendStatus != "starting")
+        self.assertEqual(self.driver.backendStatus, "cpu")
+
+    def test_backend_status_distinguishes_gpu_and_cpu_fallback(self):
+        class CpuFallback(FakeEngine):
+            def __init__(self, use_gpu=False):
+                super().__init__(use_gpu=False)
+        for engine, expected in ((FakeEngine, "gpu"), (CpuFallback, "cpu-fallback")):
+            with self.subTest(expected=expected), patch.object(driver_module, "Engine", engine), \
+                    patch.object(driver_module._settings, "use_gpu", return_value=True):
+                driver = driver_module.SynthDriver()
+                try:
+                    self.assertTrue(hasattr(driver, "backendStatus"))
+                    wait_for(lambda: driver.backendStatus != "starting")
+                    self.assertEqual(driver.backendStatus, expected)
+                finally:
+                    driver.terminate()
+
+    def test_backend_status_reports_stop_without_native_calls(self):
+        self.driver.terminate()
+        self.assertEqual(self.driver.backendStatus, "stopped")
+
     def test_cancel_discards_old_audio_and_keeps_new_utterance(self):
         self.driver.speak(["block", commands.IndexCommand(1)])
         self.assertTrue(FakeEngine.started.wait(2))

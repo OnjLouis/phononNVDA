@@ -6,6 +6,10 @@ included, with no first-use download required.
 
 ## Changelog
 
+### 1.0.2
+
+- Added a read-only Synthesis backend field to the Phonon settings panel, showing actual GPU operation, CPU operation or CPU fallback after initialization.
+
 ### 1.0.1
 
 - Fixed the Voice list retaining voices from the previous Language filter in NVDA Speech settings. The choices and selected voice now update together, including after reopening settings. Cancel still restores the previous settings.
@@ -45,7 +49,7 @@ access. Keep a familiar alternative synthesizer available.
 
 ## Settings and Updates
 
-The Phonon settings panel contains GPU acceleration, Check for updates, Check
+The Phonon settings panel contains GPU acceleration, Synthesis backend, Check for updates, Check
 for updates now and Help. Update intervals are Never, Hourly or Daily; Daily is the
 default. Help opens this manual.
 
@@ -60,6 +64,11 @@ uses the CPU, without a popup or spoken warning. The reason is recorded once in
 the NVDA log, and GPU initialization is not retried until NVDA restarts. No
 graphics driver is downloaded or installed. CPU speech remains available without a GPU.
 
+**Synthesis backend** reports the running engine, rather than just whether a
+GPU is present. It distinguishes GPU (Vulkan), CPU with GPU disabled, and CPU
+fallback after unsuccessful GPU initialization. If Phonon is not selected, no
+backend is assumed. The field updates only while this settings panel is open.
+
 Updates require a valid Phonon signature and matching package identity, version,
 size and hash. Downloads are staged outside the add-ons folder and installed by
 NVDA after your approval. Restart NVDA when prompted. Saved speech settings are
@@ -70,6 +79,18 @@ kept.
 Speech is generated on this computer. Spoken text and audio are not saved or
 sent over the network. Only update checks and approved update downloads use the
 network. Automatic update checks can be disabled.
+
+## Downloads And Support
+
+- [Download Phonon for NVDA](https://github.com/OnjLouis/phononNVDA/releases/latest)
+- [Project, source code and issue tracker](https://github.com/OnjLouis/phononNVDA)
+- [Phonon SAPI for other Windows speech applications](https://github.com/OnjLouis/phononSAPI/releases/latest)
+- [Phonon for Mac (Apple Silicon)](https://github.com/OnjLouis/phononMac/releases/latest)
+- [Andre Louis software catalogue](https://onj.me/software)
+- [Contact Andre Louis](https://onj.me/contact)
+- [Donate to support development](https://onj.me/donate)
+
+Donations are optional and do not unlock features.
 
 ## Credits and Licences
 

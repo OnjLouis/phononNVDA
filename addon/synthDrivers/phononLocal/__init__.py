@@ -56,6 +56,7 @@ class SynthDriver(BaseSynth):
         self._latest_job = 0
         self._jobs = queue.Queue()
         self._useGpu = _settings.use_gpu()
+        self._backendState = "starting"
         self._player = nvwave.WavePlayer(1, SAMPLE_RATE, 16, outputDevice=config.conf["audio"]["outputDevice"])
         self._worker = threading.Thread(target=self._run, name="Phonon native speech", daemon=True)
         self._worker.start()
@@ -79,6 +80,11 @@ class SynthDriver(BaseSynth):
             return self._voices
         return OrderedDict((name, info) for name, info in self._voices.items()
                            if LANGUAGES.get(normalise(name)) == self._locale)
+
+    @property
+    def backendStatus(self):
+        """Cached worker state; safe to read without calling the native engine."""
+        return "stopped" if self._stopping.is_set() else self._backendState
 
     def _get_availableLocales(self):
         from languageHandler import getLanguageDescription
@@ -264,7 +270,8 @@ class SynthDriver(BaseSynth):
         try:
             start = time.monotonic()
             engine = Engine(use_gpu=self._useGpu)
-            log.info("Phonon 1.0 %s engine ready: %d voices; load %.3f s.", engine.backend,
+            self._backendState = {"GPU (Vulkan)": "gpu", "CPU": "cpu-fallback" if self._useGpu else "cpu"}.get(engine.backend, "unknown")
+            log.info("Phonon %s engine ready: %d voices; load %.3f s.", engine.backend,
                      len(self._voices), time.monotonic() - start)
             while True:
                 job = self._jobs.get()
@@ -278,6 +285,7 @@ class SynthDriver(BaseSynth):
                 if self._jobs.empty():
                     self._player.idle()
         except Exception:
+            self._backendState = "failed"
             log.error("Phonon native speech worker failed.", exc_info=True)
             self._failure()
         finally:

@@ -4,8 +4,14 @@
 for English, French, German, Spanish and Portuguese. The model and voices are
 included, with no first-use download required.</p>
 <h2>Changelog</h2>
+<h3>1.0.2</h3>
+<ul>
+<li>Added a read-only Synthesis backend field to the Phonon settings panel, showing actual GPU operation, CPU operation or CPU fallback after initialization.</li>
+</ul>
 <h3>1.0.1</h3>
-<ul><li>Fixed the Voice list retaining voices from the previous Language filter in NVDA Speech settings. The choices and selected voice now update together, including after reopening settings. Cancel still restores the previous settings.</li></ul>
+<ul>
+<li>Fixed the Voice list retaining voices from the previous Language filter in NVDA Speech settings. The choices and selected voice now update together, including after reopening settings. Cancel still restores the previous settings.</li>
+</ul>
 <h3>1.0</h3>
 <ul>
 <li>Bundled multilingual model and 102 voices, ready to use after installation.</li>
@@ -32,7 +38,7 @@ starting replacement speech, so responsiveness depends on the processor.</p>
 <p>If the native engine fails, the active driver switches to eSpeak NG to preserve
 access. Keep a familiar alternative synthesizer available.</p>
 <h2>Settings and Updates</h2>
-<p>The Phonon settings panel contains GPU acceleration, Check for updates, Check
+<p>The Phonon settings panel contains GPU acceleration, Synthesis backend, Check for updates, Check
 for updates now and Help. Update intervals are Never, Hourly or Daily; Daily is the
 default. Help opens this manual.</p>
 <p><strong>Use GPU acceleration when available</strong> is checked by default. Phonon uses a
@@ -44,6 +50,10 @@ synthesizer and back to Phonon, or restart NVDA.</p>
 uses the CPU, without a popup or spoken warning. The reason is recorded once in
 the NVDA log, and GPU initialization is not retried until NVDA restarts. No
 graphics driver is downloaded or installed. CPU speech remains available without a GPU.</p>
+<p><strong>Synthesis backend</strong> reports the running engine, rather than just whether a
+GPU is present. It distinguishes GPU (Vulkan), CPU with GPU disabled, and CPU
+fallback after unsuccessful GPU initialization. If Phonon is not selected, no
+backend is assumed. The field updates only while this settings panel is open.</p>
 <p>Updates require a valid Phonon signature and matching package identity, version,
 size and hash. Downloads are staged outside the add-ons folder and installed by
 NVDA after your approval. Restart NVDA when prompted. Saved speech settings are
@@ -52,6 +62,17 @@ kept.</p>
 <p>Speech is generated on this computer. Spoken text and audio are not saved or
 sent over the network. Only update checks and approved update downloads use the
 network. Automatic update checks can be disabled.</p>
+<h2>Downloads And Support</h2>
+<ul>
+<li><a href="https://github.com/OnjLouis/phononNVDA/releases/latest">Download Phonon for NVDA</a></li>
+<li><a href="https://github.com/OnjLouis/phononNVDA">Project, source code and issue tracker</a></li>
+<li><a href="https://github.com/OnjLouis/phononSAPI/releases/latest">Phonon SAPI for other Windows speech applications</a></li>
+<li><a href="https://github.com/OnjLouis/phononMac/releases/latest">Phonon for Mac (Apple Silicon)</a></li>
+<li><a href="https://onj.me/software">Andre Louis software catalogue</a></li>
+<li><a href="https://onj.me/contact">Contact Andre Louis</a></li>
+<li><a href="https://onj.me/donate">Donate to support development</a></li>
+</ul>
+<p>Donations are optional and do not unlock features.</p>
 <h2>Credits and Licences</h2>
 <p>Add-on by Andre Louis, with development assistance from OpenAI Codex.
 <a href="https://github.com/gradium-ai/xn-ptts">Gradium's Phonon runtime</a> builds on
