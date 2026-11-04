@@ -8,6 +8,15 @@ patch adds compute unit 3 for Vulkan and initializes this DLL's own CPU pool
 with at most three participants. It does not set process-wide environment
 variables. The CPU ABI and model generation algorithm are unchanged.
 
+After `ptts-windows.patch`, apply `ptts-performance.patch` at the source root.
+It backports Gradium's merged [PR 296](https://github.com/gradium-ai/xn-ptts/pull/296)
+and [PR 325](https://github.com/gradium-ai/xn-ptts/pull/325): reusable flow-time
+conditioning and a bounded least-recently-used primed-voice cache. The latter
+includes its upstream regression tests. These changes retain the 0.5.0 ABI,
+checkpoint, sampling defaults and Windows safety patches; they do not adopt
+the experimental quantized decoder or CUDA changes. Credit to David Blum and
+Rudraksh Karpe for this upstream work. The backport remains MIT OR Apache-2.0.
+
 Unpack the `xn` 0.2.11 crate into `xn` inside that source tree, then apply
 `xn-vulkan.patch` inside it. The workspace patch selects that copy. It fixes
 native cleanup after failed Vulkan initialization, buffer allocation and

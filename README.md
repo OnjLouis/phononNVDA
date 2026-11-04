@@ -6,6 +6,11 @@ included, with no first-use download required.
 
 ## Changelog
 
+### 1.0.3
+
+- Improved speech-generation efficiency on CPU and GPU without changing the model or voice data.
+- Kept frequently used voices ready while browsing larger voice selections, avoiding unnecessary delays when returning to them.
+
 ### 1.0.2
 
 - Added a read-only Synthesis backend field to the Phonon settings panel, showing actual GPU operation, CPU operation or CPU fallback after initialization.
