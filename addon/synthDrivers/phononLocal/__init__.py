@@ -17,8 +17,8 @@ from synthDriverHandler import SynthDriver as BaseSynth, VoiceInfo, synthDoneSpe
 from ._audio import Processor, percent
 from ._runtime import Engine, MODEL, SAMPLE_RATE, available, language
 from ._sequence import events
-from . import _settings
-from ._voice_languages import GROUPS, LANGUAGES, normalise
+from . import _imports, _settings
+from ._voice_languages import GROUPS, normalise
 
 
 class SynthDriver(BaseSynth):
@@ -41,10 +41,11 @@ class SynthDriver(BaseSynth):
             raise RuntimeError("Phonon's bundled model or supported 64-bit CPU runtime is unavailable.")
         super().__init__()
         files = {normalise(path.stem): path.stem for path in (MODEL / "voices").glob("*.safetensors")}
-        self._voices = OrderedDict((files[normalise(name)], VoiceInfo(files[normalise(name)], name, language=locale))
-                                  for locale, names in GROUPS.items() for name in names if normalise(name) in files)
-        if not self._voices:
+        self._stock_voices = OrderedDict((files[normalise(name)], VoiceInfo(files[normalise(name)], name, language=locale))
+                                        for locale, names in GROUPS.items() for name in names if normalise(name) in files)
+        if not self._stock_voices:
             raise RuntimeError("Phonon has no installed catalogue voices.")
+        self._voices = self._catalogue()
         self._voice = "Freya" if "Freya" in self._voices else next(iter(self._voices))
         self._locale = "all"
         self._rate, self._pitch, self._volume, self._rateBoost = 50, 50, 100, False
@@ -78,8 +79,30 @@ class SynthDriver(BaseSynth):
     def _get_availableVoices(self):
         if self._locale == "all":
             return self._voices
-        return OrderedDict((name, info) for name, info in self._voices.items()
-                           if LANGUAGES.get(normalise(name)) == self._locale)
+        return OrderedDict((name, info) for name, info in self._voices.items() if info.language == self._locale)
+
+    def _catalogue(self):
+        voices = self._stock_voices.copy()
+        try:
+            imported = _imports.list_voices(_imports.profile_root())
+        except OSError:
+            log.warning("Phonon could not read its imported voice catalogue.")
+            return voices
+        voices.update((voice.id, VoiceInfo(voice.id, voice.name, language=voice.locale)) for voice in imported)
+        return voices
+
+    def refreshImportedVoices(self):
+        voices = self._catalogue()
+        if [(v.id, v.displayName, v.language) for v in voices.values()] == [
+                (v.id, v.displayName, v.language) for v in self._voices.values()]:
+            return
+        self.cancel()
+        self._voices = voices
+        if self._locale not in self._get_availableLocales():
+            self._locale = "all"
+        self._set_voice(self._voice)
+        self.invalidateCache()
+        self._refreshControls()
 
     @property
     def backendStatus(self):
@@ -88,7 +111,7 @@ class SynthDriver(BaseSynth):
 
     def _get_availableLocales(self):
         from languageHandler import getLanguageDescription
-        codes = {LANGUAGES[normalise(name)] for name in self._voices}
+        codes = {voice.language for voice in self._voices.values()}
         labels = {code: ("English Character Voices" if code == "en" else getLanguageDescription(code) or code)
                   for code in codes}
         result = OrderedDict([("all", StringParameterInfo("all", "All languages"))])
@@ -138,10 +161,11 @@ class SynthDriver(BaseSynth):
 
     def _set_voice(self, value):
         voices = self._get_availableVoices()
-        self._voice = value if value in voices else next(iter(voices))
+        self._voice = value if value in voices else next((key for key in voices if key in self._stock_voices), next(iter(voices)))
 
     def _get_language(self):
-        return LANGUAGES.get(normalise(self._voice), "en_GB")
+        info = self._voices.get(self._voice)
+        return info.language if info else "en_GB"
 
     def _get_rate(self):
         return self._rate
@@ -245,9 +269,9 @@ class SynthDriver(BaseSynth):
                         self._feed(epoch, tail)
         self._feed(epoch, callback=lambda: self._done(epoch, job))
 
-    @staticmethod
-    def _voice_language(voice):
-        return language(LANGUAGES.get(normalise(voice), "en"))
+    def _voice_language(self, voice):
+        info = self._voices.get(voice)
+        return language(info.language if info else "en")
 
     def _failure(self):
         if self._fallbackPending.is_set():

@@ -226,6 +226,22 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.driver.language, "de_DE")
         self.assertNotIn("model", [getattr(s, "id", None) for s in self.driver.supportedSettings])
 
+    def test_import_refresh_filters_and_removal_restores_stock_voice(self):
+        voice = driver_module._imports.Voice("imported-" + "a" * 32, "Test voice", "de_DE")
+        self.driver.locale = "de_DE"
+        with patch.object(self.driver, "_refreshControls") as refresh, \
+                patch.object(driver_module._imports, "list_voices", return_value=(voice,)) as catalogue:
+            self.driver.refreshImportedVoices()
+            self.assertEqual(list(self.driver.availableVoices), ["Nele", voice.id])
+            self.driver.voice = voice.id
+            self.driver.speak(["Test"])
+            wait_for(lambda: FakeEngine.calls and FakeEngine.calls[-1] == ("Test", voice.id, "de"))
+            catalogue.return_value = ()
+            self.driver.refreshImportedVoices()
+            self.assertEqual(self.driver.voice, "Nele")
+            self.assertEqual(list(self.driver.availableVoices), ["Nele"])
+            self.assertEqual(refresh.call_count, 2)
+
     def test_reopened_speech_panel_refreshes_voice_choices_after_filter_change(self):
         self.driver.locale = 'en_GB'
         panel = VoicePanel(self.driver)

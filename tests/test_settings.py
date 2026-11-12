@@ -81,8 +81,8 @@ class SettingsTests(unittest.TestCase):
 
     def test_gpu_updates_and_help_have_unique_mnemonics(self):
         labels = [control.label for control in self.panel.children]
-        self.assertEqual(labels, ["Use &GPU acceleration when available", "Synthesis &backend:", "Check for &updates:", "&Check for updates now", "&Help"])
-        self.assertEqual([label.split("&", 1)[1][0].lower() for label in labels], ["g", "b", "u", "c", "h"])
+        self.assertEqual(labels, ["Use &GPU acceleration when available", "Synthesis &backend:", "Check for &updates:", "&Manage imported voices...", "&Check for updates now", "&Help"])
+        self.assertEqual([label.split("&", 1)[1][0].lower() for label in labels], ["g", "b", "u", "m", "c", "h"])
         self.assertFalse(self.panel.gpu.GetValue())
         self.assertEqual(self.panel.interval.name, "Check for updates")
         self.assertEqual(self.panel.interval.choices, ["Never", "Hourly", "Daily"])

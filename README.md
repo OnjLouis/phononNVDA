@@ -6,6 +6,10 @@ included, with no first-use download required.
 
 ## Changelog
 
+### 1.0.4
+
+- Import compatible Phonon voice files and use them in the synth ring or Speech settings.
+
 ### 1.0.3
 
 - Improved speech-generation efficiency on CPU and GPU without changing the model or voice data.
@@ -43,6 +47,12 @@ Choose Language filter and Voice in Speech settings or the synth settings ring.
 English Character Voices groups the catalogue's character voices separately
 from British and American English. The filter limits the voice list; it does not
 translate text. The model supports the five languages listed above.
+
+To add a voice exported from [Gradium Studio](https://github.com/gradium-ai/xn-ptts#download-a-voice-from-gradium-studio),
+open NVDA Settings, Phonon, then **Manage imported voices**. Choose **Add voice**,
+select the `.safetensors` file, name the voice and select its spoken language.
+You can then select it like a built-in voice. Imports stay in the NVDA profile
+and are not uploaded. **Remove voice** removes Phonon's copy, not the original.
 
 Rate, Rate boost, Pitch and Volume use NVDA's streaming Sonic processing.
 Audio plays through NVDA's selected output device. Shift pauses or resumes;

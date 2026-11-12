@@ -17,6 +17,12 @@ checkpoint, sampling defaults and Windows safety patches; they do not adopt
 the experimental quantized decoder or CUDA changes. Credit to David Blum and
 Rudraksh Karpe for this upstream work. The backport remains MIT OR Apache-2.0.
 
+Apply `ptts-voice-import.patch` after `ptts-performance.patch`. This adds
+bounded safetensors validation and two C exports for validating and selecting
+an imported voice. The native engine replaces one reserved voice slot rather
+than accumulating a separate loaded tensor for every import. The patch uses
+the same MIT OR Apache-2.0 terms as the upstream runtime.
+
 Unpack the `xn` 0.2.11 crate into `xn` inside that source tree, then apply
 `xn-vulkan.patch` inside it. The workspace patch selects that copy. It fixes
 native cleanup after failed Vulkan initialization, buffer allocation and

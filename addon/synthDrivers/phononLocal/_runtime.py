@@ -7,6 +7,7 @@ import sys
 import threading
 
 from logHandler import log
+from . import _imports
 
 SAMPLE_RATE = 24000
 MAX_INPUT = 4096
@@ -74,9 +75,22 @@ def _library():
         ):
             function = getattr(library, name)
             function.restype, function.argtypes = result, arguments
+        for name, arguments in (
+            ("ptts_validate_imported_voice", [C.c_char_p, C.c_char_p, C.c_size_t]),
+            ("ptts_set_imported_voice", [C.c_void_p, C.c_char_p, C.c_size_t]),
+        ):
+            function = getattr(library, name, None)
+            if function is not None:
+                function.restype, function.argtypes = C.c_bool, arguments
         # The DLL's shared worker pool outlives individual model handles.
         _DLL = library
         return library
+
+
+def validate_import(data):
+    validate = getattr(_library(), "ptts_validate_imported_voice", None)
+    if validate is None or not validate(str(MODEL).encode("utf-8"), data, len(data)):
+        raise NativeError("Phonon cannot import this voice file.")
 
 
 class Engine:
@@ -84,6 +98,8 @@ class Engine:
         global _GPU_UNAVAILABLE
         self._owner = threading.get_ident()
         self._handle = None
+        self._selected_import = None
+        self._rejected_import = None
         self.backend = 'CPU'
         if not supported():
             raise NativeError("Phonon requires 64-bit NVDA and an AVX2-capable processor.")
@@ -134,14 +150,33 @@ class Engine:
         if threading.get_ident() != self._owner:
             raise RuntimeError("Phonon's engine must be used only by its speech worker.")
 
+    def _select_voice(self, voice):
+        if _imports.is_imported(voice):
+            if self._selected_import == voice:
+                return
+            if self._rejected_import != voice:
+                try:
+                    data = _imports.read_voice(_imports.profile_root(), voice)
+                    select = getattr(self._dll, "ptts_set_imported_voice", None)
+                    if select is not None and select(self._handle, data, len(data)):
+                        self._selected_import = voice
+                        return
+                except (OSError, ValueError):
+                    pass
+                self._rejected_import = voice
+                log.warning("An imported Phonon voice is unavailable; using Freya for this request.")
+            voice = "Freya"
+        self._selected_import = None
+        if not self._dll.ptts_set_voice(self._handle, voice.encode("utf-8")):
+            raise NativeError("Phonon could not select the requested voice.")
+
     def speak(self, text, voice, locale, cancel, sink):
         self._check_owner()
         if cancel.is_set():
             return None
         if not self._handle or not text or len(text) > MAX_INPUT or "\0" in text:
             raise NativeError("The Phonon speech request is invalid.")
-        if not self._dll.ptts_set_voice(self._handle, voice.encode("utf-8")):
-            raise NativeError("Phonon could not select the requested voice.")
+        self._select_voice(voice)
         if not self._dll.ptts_set_language(self._handle, language(locale).encode("ascii")):
             raise NativeError("Phonon could not select the requested language.")
         failure = []

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 import os
+from pathlib import Path
 
 import addonHandler
 import globalPluginHandler
@@ -9,12 +10,103 @@ import gui.guiHelper
 import gui.settingsDialogs
 import wx
 import synthDriverHandler
+import languageHandler
 
-from synthDrivers.phononLocal import _settings
+from synthDrivers.phononLocal import _imports, _runtime, _settings
 from ._updater import GitHubReleaseUpdater
 
 addonHandler.initTranslation()
 _updater = None
+
+
+def _reportVoiceError(message):
+    gui.messageBox(message, _("Phonon voices"), wx.OK | wx.ICON_ERROR)
+
+
+def _manageVoices(parent):
+    root = _imports.profile_root()
+    dialog = wx.Dialog(parent, title=_("Manage imported Phonon voices"))
+    try:
+        helper = gui.guiHelper.BoxSizerHelper(dialog, orientation=wx.VERTICAL)
+        voices = helper.addLabeledControl(_("&Imported voices:"), wx.ListBox)
+        voices.SetName(_("Imported voices"))
+        add = helper.addItem(wx.Button(dialog, label=_("&Add voice...")))
+        remove = helper.addItem(wx.Button(dialog, label=_("&Remove voice")))
+        close = helper.addItem(wx.Button(dialog, wx.ID_CLOSE, label=_("&Close")))
+        dialog.SetEscapeId(wx.ID_CLOSE)
+        dialog.SetSizerAndFit(helper.sizer)
+        entries = ()
+
+        def updateRemoval(event=None):
+            remove.Enable(voices.GetSelection() != wx.NOT_FOUND)
+
+        def refresh(preferred=None):
+            nonlocal entries
+            try:
+                entries = _imports.list_voices(root)
+            except OSError:
+                entries = ()
+                _reportVoiceError(_("Phonon could not read the imported voice folder."))
+            voices.Set([_("{name}, {language}").format(name=voice.name,
+                language=languageHandler.getLanguageDescription(voice.locale) or voice.locale) for voice in entries])
+            if entries:
+                voices.SetSelection(next((index for index, voice in enumerate(entries) if voice.id == preferred), 0))
+            updateRemoval()
+            synth = synthDriverHandler.getSynth()
+            if getattr(synth, "name", None) == "phononLocal":
+                synth.refreshImportedVoices()
+
+        def onAdd(event):
+            with wx.FileDialog(dialog, _("Choose a Phonon voice"), wildcard=_("Phonon voice (*.safetensors)|*.safetensors"),
+                               style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as picker:
+                if picker.ShowModal() != wx.ID_OK:
+                    return
+                path = Path(picker.GetPath())
+            with wx.TextEntryDialog(dialog, _("Voice name:"), _("Add Phonon voice"), path.stem[:_imports.MAX_NAME]) as naming:
+                if naming.ShowModal() != wx.ID_OK:
+                    return
+                name = naming.GetValue()
+            locales = sorted(_imports.LOCALES, key=lambda code: languageHandler.getLanguageDescription(code) or code)
+            with wx.SingleChoiceDialog(dialog, _("Choose the spoken language:"), _("Add Phonon voice"),
+                    [languageHandler.getLanguageDescription(code) or code for code in locales]) as selection:
+                if selection.ShowModal() != wx.ID_OK:
+                    return
+                index = selection.GetSelection()
+                if index == wx.NOT_FOUND:
+                    return
+                locale = locales[index]
+            try:
+                voice = _imports.add_voice(root, path, name, locale, _runtime.validate_import)
+            except (OSError, ValueError, _runtime.NativeError):
+                _reportVoiceError(_("Could not import this voice. Choose a compatible Phonon .safetensors file and enter a valid name."))
+                return
+            refresh(voice.id)
+            voices.SetFocus()
+
+        def onRemove(event):
+            index = voices.GetSelection()
+            if not 0 <= index < len(entries):
+                return
+            voice = entries[index]
+            if gui.messageBox(_("Remove the imported voice {name}?").format(name=voice.name),
+                              _("Phonon voices"), wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION) != wx.YES:
+                return
+            try:
+                _imports.remove_voice(root, voice.id)
+            except (OSError, ValueError):
+                _reportVoiceError(_("Could not completely remove the imported voice."))
+            refresh()
+            (voices if entries else add).SetFocus()
+
+        voices.Bind(wx.EVT_LISTBOX, updateRemoval)
+        add.Bind(wx.EVT_BUTTON, onAdd)
+        remove.Bind(wx.EVT_BUTTON, onRemove)
+        close.Bind(wx.EVT_BUTTON, lambda event: dialog.EndModal(wx.ID_CLOSE))
+        refresh()
+        (voices if entries else add).SetFocus()
+        dialog.ShowModal()
+    finally:
+        dialog.Destroy()
 
 
 class PhononSettingsPanel(gui.settingsDialogs.SettingsPanel):
@@ -37,6 +129,8 @@ class PhononSettingsPanel(gui.settingsDialogs.SettingsPanel):
                                                choices=[_("Never"), _("Hourly"), _("Daily")])
         self.interval.SetName(_("Check for updates"))
         self.interval.SetSelection(_settings.INTERVALS.index(_settings.update_interval()))
+        self.imports = helper.addItem(wx.Button(self, label=_("&Manage imported voices...")))
+        self.imports.Bind(wx.EVT_BUTTON, lambda event: _manageVoices(self))
         self.check = helper.addItem(wx.Button(self, label=_("&Check for updates now")))
         self.check.Bind(wx.EVT_BUTTON, self.onCheck)
         self.help = helper.addItem(wx.Button(self, label=_("&Help")))

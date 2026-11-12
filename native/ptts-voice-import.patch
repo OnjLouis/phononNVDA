@@ -1,0 +1,309 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -8,6 +8,7 @@
+   "ptts-wasm",
+   "ptts-ws-server",
+   "xn",
++  "voice-import",
+ ]
+ resolver = "3"
+ 
+--- a/ptts-ffi/Cargo.toml
++++ b/ptts-ffi/Cargo.toml
+@@ -16,6 +16,9 @@
+ # same prompt the other frontends do.
+ ptts = { workspace = true, features = ["hf"] }
+ serde_json = { workspace = true }
++
++[target.'cfg(not(target_vendor = "apple"))'.dependencies]
++phonon-voice-import-validation = { path = "../voice-import" }
+ xn = { workspace = true }
+ 
+ [target.'cfg(target_vendor = "apple")'.dependencies]
+--- a/ptts-ffi/src/lib.rs
++++ b/ptts-ffi/src/lib.rs
+@@ -24,6 +24,8 @@
+ mod cpu;
+ #[cfg(not(target_vendor = "apple"))]
+ use cpu::Engine;
++#[cfg(not(target_vendor = "apple"))]
++mod import;
+ 
+ /// Compute unit identifiers. Vulkan is an optional non-Apple backend.
+ pub const PTTS_UNIT_CPU: u32 = 0;
+--- a/ptts-ffi/src/cpu.rs
++++ b/ptts-ffi/src/cpu.rs
+@@ -33,6 +33,19 @@
+         xn::threadpool::PoolConfig { workers: participants - 1, spin_budget: None },
+         |job| { std::thread::spawn(job); },
+     );
++}
++
++pub(crate) fn decode_import(cfg: &ptts::tts_model::TTSConfig, bytes: &[u8])
++    -> Result<phonon_voice_import_validation::VoiceTensor, String>
++{
++    use phonon_voice_import_validation::{decode, Checkpoint};
++    let tags = cfg.embeddings_ext.as_deref().unwrap_or_default().iter().map(String::as_str).collect::<Vec<_>>();
++    let checkpoint = Checkpoint {
++        embedding_width: cfg.flow_lm.d_model,
++        latent_width: Some(cfg.speaker_mimi_cfg().encoder_latent_dim()),
++        compatible_model_tags: &tags,
++    };
++    decode(bytes, &checkpoint).map_err(|error| format!("Invalid Phonon voice: {error:?}"))
+ }
+ 
+ pub struct Engine {
+@@ -84,6 +97,21 @@
+ 
+     pub fn voices(&self) -> &[String] {
+         &self.voices
++    }
++
++    pub(crate) fn set_imported_voice(&mut self, bytes: &[u8]) -> Result<(), String> {
++        use phonon_voice_import_validation::TensorKind;
++        const SLOT: &str = "__phonon_imported_voice";
++        if self.voices.iter().any(|name| name == SLOT) {
++            return Err("The model uses Phonon's reserved import slot".into());
++        }
++        let voice = decode_import(self.synth.config(), bytes)?;
++        match voice.kind {
++            TensorKind::Embedding => self.synth.add_voice_from_embedding(SLOT, &voice.values, voice.frames, voice.width, None),
++            TensorKind::Latents => self.synth.add_voice_from_latents(SLOT, &voice.values, voice.width, voice.frames),
++        }.map_err(|error| error.to_string())?;
++        self.voice = Some(SLOT.into());
++        Ok(())
+     }
+ 
+     pub fn languages(&self) -> &[String] {
+--- /dev/null
++++ b/ptts-ffi/src/import.rs
+@@ -0,0 +1,50 @@
++use crate::{guarded, c_string, LAST_ERROR, PttsHandle};
++use phonon_voice_import_validation::MAX_VOICE_BYTES;
++use std::{ffi::{c_char, CStr}, path::Path};
++
++/// Validate a voice against the bundled configuration without loading weights.
++///
++/// # Safety
++/// `directory` is a NUL-terminated UTF-8 string, and `data` points to `length`
++/// readable bytes. Failure is available from `ptts_last_error(NULL)`.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn ptts_validate_imported_voice(
++    directory: *const c_char,
++    data: *const u8,
++    length: usize,
++) -> bool {
++    let result = guarded(|| {
++        if directory.is_null() || data.is_null() || length == 0 || length > MAX_VOICE_BYTES {
++            return Err("Invalid Phonon voice file size".into());
++        }
++        let directory = unsafe { CStr::from_ptr(directory) }.to_str().map_err(|e| e.to_string())?;
++        let config = ptts::checkpoint::read_config(&Path::new(directory).join("config.json"))
++            .map_err(|e| e.to_string())?;
++        crate::cpu::decode_import(&config, unsafe { std::slice::from_raw_parts(data, length) }).map(|_| ())
++    });
++    LAST_ERROR.with(|slot| *slot.borrow_mut() = result.as_ref().err().map(|e| c_string(e)));
++    result.is_ok()
++}
++
++/// Validate and select one custom voice on the same thread that owns this handle.
++/// The reserved slot is replaced rather than letting custom tensors accumulate.
++///
++/// # Safety
++/// `handle` must come from `ptts_new`. `data` must point to `length` readable bytes
++/// and the caller must not concurrently access `handle`.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn ptts_set_imported_voice(
++    handle: *mut PttsHandle,
++    data: *const u8,
++    length: usize,
++) -> bool {
++    let Some(handle) = (unsafe { handle.as_mut() }) else { return false };
++    let result = guarded(|| {
++        if data.is_null() || length == 0 || length > MAX_VOICE_BYTES {
++            return Err("Invalid Phonon voice file size".into());
++        }
++        handle.engine.set_imported_voice(unsafe { std::slice::from_raw_parts(data, length) })
++    });
++    handle.last_error = result.as_ref().err().map(|error| c_string(error));
++    result.is_ok()
++}
+--- /dev/null
++++ b/voice-import/Cargo.toml
+@@ -0,0 +1,8 @@
++[package]
++name = "phonon-voice-import-validation"
++version = "0.1.0"
++edition = "2024"
++publish = false
++
++[dependencies]
++safetensors = "=0.7.0"
+--- /dev/null
++++ b/voice-import/src/lib.rs
+@@ -0,0 +1,165 @@
++use safetensors::{Dtype, SafeTensors};
++use std::io::{self, Read};
++
++pub const MAX_VOICE_BYTES: usize = 4 * 1024 * 1024;
++const MAX_HEADER_BYTES: usize = 16 * 1024;
++const MAX_VOICE_FRAMES: usize = 512;
++
++pub struct Checkpoint<'a> {
++    pub embedding_width: usize,
++    pub latent_width: Option<usize>,
++    pub compatible_model_tags: &'a [&'a str],
++}
++
++#[derive(Debug, PartialEq, Eq)]
++pub enum TensorKind {
++    Embedding,
++    Latents,
++}
++
++#[derive(Debug)]
++pub struct VoiceTensor {
++    pub kind: TensorKind,
++    pub frames: usize,
++    pub width: usize,
++    pub values: Vec<f32>,
++}
++
++#[derive(Debug, PartialEq, Eq)]
++pub enum InvalidVoice {
++    Size,
++    Format,
++    Tensor,
++    Checkpoint,
++    NonFinite,
++}
++
++/// Read at most one byte beyond the import limit even if the file changes while opened.
++pub fn read_bounded(input: impl Read) -> io::Result<Vec<u8>> {
++    let mut bytes = Vec::new();
++    input.take((MAX_VOICE_BYTES + 1) as u64).read_to_end(&mut bytes)?;
++    if bytes.len() > MAX_VOICE_BYTES {
++        return Err(io::Error::new(io::ErrorKind::InvalidData, "Phonon voice file is too large"));
++    }
++    Ok(bytes)
++}
++
++/// Validate for the destination checkpoint before registering anything or touching an engine.
++pub fn decode(bytes: &[u8], checkpoint: &Checkpoint<'_>) -> Result<VoiceTensor, InvalidVoice> {
++    if bytes.len() > MAX_VOICE_BYTES {
++        return Err(InvalidVoice::Size);
++    }
++    let length = bytes.get(..8).ok_or(InvalidVoice::Format)?;
++    if u64::from_le_bytes(length.try_into().map_err(|_| InvalidVoice::Format)?) > MAX_HEADER_BYTES as u64 {
++        return Err(InvalidVoice::Size);
++    }
++    let (_, metadata) = SafeTensors::read_metadata(bytes).map_err(|_| InvalidVoice::Format)?;
++    if let Some(tag) = metadata.metadata().as_ref().and_then(|m| m.get("model_ext"))
++        && !checkpoint.compatible_model_tags.is_empty()
++        && !checkpoint.compatible_model_tags.contains(&tag.as_str())
++    {
++        return Err(InvalidVoice::Checkpoint);
++    }
++    let tensors = SafeTensors::deserialize(bytes).map_err(|_| InvalidVoice::Format)?;
++    let names = tensors.names();
++    let [name] = names.as_slice() else { return Err(InvalidVoice::Tensor) };
++    let kind = match *name {
++        "emb" | "audio_prompt" => TensorKind::Embedding,
++        "speaker_wavs" => TensorKind::Latents,
++        _ => return Err(InvalidVoice::Tensor),
++    };
++    let tensor = tensors.tensor(name).map_err(|_| InvalidVoice::Tensor)?;
++    if tensor.dtype() != Dtype::F32 {
++        return Err(InvalidVoice::Tensor);
++    }
++    let (outer, inner) = match tensor.shape() {
++        [outer, inner] | [1, outer, inner] => (*outer, *inner),
++        _ => return Err(InvalidVoice::Tensor),
++    };
++    let (frames, width, expected_width) = match kind {
++        TensorKind::Embedding => (outer, inner, checkpoint.embedding_width),
++        TensorKind::Latents => (inner, outer, checkpoint.latent_width.ok_or(InvalidVoice::Checkpoint)?),
++    };
++    if width == 0 || width != expected_width || !(1..=MAX_VOICE_FRAMES).contains(&frames) {
++        return Err(InvalidVoice::Checkpoint);
++    }
++    let values = tensor.data().chunks_exact(4).map(|raw| {
++        let value = f32::from_le_bytes(raw.try_into().expect("f32 chunk"));
++        value.is_finite().then_some(value).ok_or(InvalidVoice::NonFinite)
++    }).collect::<Result<Vec<_>, _>>()?;
++    Ok(VoiceTensor { kind, frames, width, values })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use safetensors::{serialize, tensor::TensorView};
++    use std::collections::HashMap;
++
++    const MODEL: Checkpoint<'_> = Checkpoint {
++        embedding_width: 512,
++        latent_width: Some(512),
++        compatible_model_tags: &["ba7a5a45@300"],
++    };
++
++    fn voice(name: &str, shape: Vec<usize>, dtype: Dtype, value: f32, tag: Option<&str>) -> Vec<u8> {
++        let data = value.to_le_bytes().repeat(shape.iter().product::<usize>() * dtype.bitsize() / 32);
++        let tensor = TensorView::new(dtype, shape, &data).unwrap();
++        serialize([(name, tensor)], tag.map(|tag| HashMap::from([("model_ext".to_owned(), tag.to_owned())]))).unwrap()
++    }
++
++    #[test]
++    fn accepts_projected_and_unprojected_layouts_without_reshaping_data() {
++        for (name, shape, kind) in [
++            ("emb", vec![1, 125, 512], TensorKind::Embedding),
++            ("audio_prompt", vec![125, 512], TensorKind::Embedding),
++            ("speaker_wavs", vec![1, 512, 125], TensorKind::Latents),
++        ] {
++            let input = voice(name, shape, Dtype::F32, 0.25, Some("ba7a5a45@300"));
++            let got = decode(&input, &MODEL).unwrap();
++            assert_eq!((got.kind, got.frames, got.width), (kind, 125, 512));
++            assert_eq!(got.values, vec![0.25; 125 * 512]);
++        }
++    }
++
++    #[test]
++    fn rejects_wrong_model_or_projection_and_invalid_dimensions() {
++        let wrong = voice("emb", vec![1, 125, 512], Dtype::F32, 0.25, Some("other-model"));
++        assert_eq!(decode(&wrong, &MODEL).unwrap_err(), InvalidVoice::Checkpoint);
++        for shape in [vec![1, 0, 512], vec![1, 513, 512], vec![125, 511]] {
++            let input = voice("emb", shape, Dtype::F32, 0.25, None);
++            assert_eq!(decode(&input, &MODEL).unwrap_err(), InvalidVoice::Checkpoint);
++        }
++        let latents = voice("speaker_wavs", vec![1, 512, 125], Dtype::F32, 0.25, None);
++        let no_projection = Checkpoint { latent_width: None, ..MODEL };
++        assert_eq!(decode(&latents, &no_projection).unwrap_err(), InvalidVoice::Checkpoint);
++    }
++
++    #[test]
++    fn rejects_wrong_tensor_type_name_shape_and_nonfinite_values() {
++        for (name, shape, dtype) in [
++            ("unrelated", vec![125, 512], Dtype::F32),
++            ("emb", vec![125, 512], Dtype::F16),
++            ("emb", vec![2, 125, 512], Dtype::F32),
++        ] {
++            let input = voice(name, shape, dtype, 0.25, None);
++            assert_eq!(decode(&input, &MODEL).unwrap_err(), InvalidVoice::Tensor);
++        }
++        for number in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
++            let input = voice("emb", vec![1, 512], Dtype::F32, number, None);
++            assert_eq!(decode(&input, &MODEL).unwrap_err(), InvalidVoice::NonFinite);
++        }
++    }
++
++    #[test]
++    fn refuses_malformed_offsets_trailing_bytes_and_oversize_reads() {
++        let mut input = voice("emb", vec![1, 512], Dtype::F32, 0.25, None);
++        let length = input.len();
++        assert_eq!(decode(&input[..length - 1], &MODEL).unwrap_err(), InvalidVoice::Format);
++        input.push(0);
++        assert_eq!(decode(&input, &MODEL).unwrap_err(), InvalidVoice::Format);
++        assert_eq!(decode(&u64::MAX.to_le_bytes(), &MODEL).unwrap_err(), InvalidVoice::Size);
++        assert!(read_bounded(io::repeat(0)).is_err());
++        assert_eq!(read_bounded(&b"sample"[..]).unwrap(), b"sample");
++    }
++}
