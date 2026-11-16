@@ -2,6 +2,7 @@
 import ctypes
 import importlib
 import os
+import struct
 from pathlib import Path
 import sys
 import tempfile
@@ -100,6 +101,35 @@ class AudioRateTests(unittest.TestCase):
                 self.assertAlmostEqual(stream.speed, speed, msg=(rate, boost))
                 self.assertEqual((stream.pitch, stream.volume), (1, 1))
 
+    def test_pause_adjustment_is_streamed_and_keeps_speech(self):
+        audio = importlib.import_module("synthDrivers.phononLocal._audio")
+        frame = audio.SAMPLE_RATE // 200
+        speech = struct.pack("<h", 1200) * frame
+        quiet = bytes(2 * frame)
+        leading = quiet * 32
+        short = quiet * 8
+        long = quiet * 60
+        pcm = leading + speech + short + speech + long + speech
+        expected = {
+            "shorter": leading + speech + short + speech + quiet * 24 + speech,
+            "longer": leading + speech + short + speech + quiet * 76 + speech,
+        }
+        for mode, want in expected.items():
+            adjust = audio.PauseAdjuster(mode, 100)
+            outputs = [adjust.process(pcm[i:i + 318]) for i in range(0, len(pcm), 318)]
+            self.assertEqual(b"".join(outputs) + adjust.finish(), want, mode)
+
+    def test_shorter_preserves_edges_and_longer_does_not_pad_an_all_quiet_request(self):
+        audio = importlib.import_module("synthDrivers.phononLocal._audio")
+        frame = audio.SAMPLE_RATE // 200
+        speech = struct.pack("<h", 1200) * frame
+        pause = b"".join(struct.pack("<h", n) * frame for n in range(60))
+        adjust = audio.PauseAdjuster("shorter", 100)
+        self.assertEqual(adjust.process(speech + pause) + adjust.finish(),
+                         speech + pause[:2 * frame * 19] + pause[-2 * frame * 5:])
+        adjust = audio.PauseAdjuster("longer", 100)
+        self.assertEqual(adjust.process(pause) + adjust.finish(), pause)
+
 
 class FakeEngine:
     calls = []
@@ -189,6 +219,20 @@ class DriverTests(unittest.TestCase):
         self.driver._player.drain()
         self.assertEqual(notice.items[0]["index"], 2)
         self.assertEqual(len(done.items), 1)
+
+    def test_pause_ring_defaults_and_leaves_explicit_break_unchanged(self):
+        self.assertEqual(self.driver.pauseLength, "default")
+        setting = next(s for s in self.driver.supportedSettings if s and s.id == "pauseLength")
+        choices = getattr(self.driver, f"available{setting.id.capitalize()}s")
+        self.assertEqual([option.displayName for option in choices.values()], ["Shorter", "Default", "Longer"])
+        for mode in ("shorter", "longer"):
+            self.driver.pauseLength = mode
+            self.assertEqual(self.driver.pauseLength, mode)
+            self.driver.speak([commands.BreakCommand(250), commands.IndexCommand(7)])
+            wait_for(lambda: len(self.driver._player.callbacks) == 2)
+            self.assertEqual(self.driver._player.audio[-1], bytes(driver_module.SAMPLE_RATE // 2))
+            self.driver._player.drain()
+            self.assertEqual(notice.items[-1]["index"], 7)
 
     def test_backend_status_reports_initialized_cpu(self):
         self.assertTrue(hasattr(self.driver, "backendStatus"))

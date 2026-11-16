@@ -4,6 +4,13 @@
 for English, French, German, Spanish and Portuguese. The model and voices are
 included, with no first-use download required.</p>
 <h2>Changelog</h2>
+<h3>1.0.6</h3>
+<ul>
+<li>Added <strong>Pause length</strong> to Speech settings and the synth ring.
+Choose <strong>Shorter</strong> or <strong>Longer</strong> to adjust sustained
+quiet gaps, or leave <strong>Default</strong> to keep the original timing.
+(<a href="https://github.com/OnjLouis/phononNVDA/issues/2">Issue #2</a>)</li>
+</ul>
 <h3>1.0.5</h3>
 <ul>
 <li>Higher Rate settings speak faster without Rate Boost. Rates at or below 50 and the existing Rate Boost curve are unchanged.</li>
@@ -49,6 +56,11 @@ open NVDA Settings, Phonon, then <strong>Manage imported voices</strong>. Choose
 select the <code>.safetensors</code> file, name the voice and select its spoken language.
 You can then select it like a built-in voice. Imports stay in the NVDA profile
 and are not uploaded. <strong>Remove voice</strong> removes Phonon's copy, not the original.</p>
+<p><strong>Pause length</strong> is available in the synth settings ring and Speech
+settings. <strong>Default</strong> leaves Phonon's audio unchanged.
+<strong>Shorter</strong> trims sustained quiet gaps, and <strong>Longer</strong> adds
+time to sustained gaps between spoken sounds. These options do not change
+punctuation or explicit pauses requested by NVDA.</p>
 <p>Rate, Rate boost, Pitch and Volume use NVDA's streaming Sonic processing.
 Audio plays through NVDA's selected output device. Shift pauses or resumes;
 Control stops speech. The engine finishes its current calculation before

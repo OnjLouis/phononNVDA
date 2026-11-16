@@ -6,6 +6,12 @@ included, with no first-use download required.
 
 ## Changelog
 
+### 1.0.6
+
+- Added **Pause length** to Speech settings and the synth ring. Use **Shorter**
+  or **Longer** to adjust sustained quiet gaps, or leave **Default** to preserve
+  the original timing. ([Issue #2](https://github.com/OnjLouis/phononNVDA/issues/2))
+
 ### 1.0.5
 
 - Higher Rate settings speak faster without Rate Boost. Rates at or below
@@ -60,6 +66,10 @@ You can then select it like a built-in voice. Imports stay in the NVDA profile
 and are not uploaded. **Remove voice** removes Phonon's copy, not the original.
 
 Rate, Rate boost, Pitch and Volume use NVDA's streaming Sonic processing.
+**Pause length** is available in the synth settings ring and Speech settings.
+**Default** leaves Phonon's audio unchanged. **Shorter** trims sustained quiet
+gaps, and **Longer** adds time to sustained gaps between spoken sounds.
+These options do not change punctuation or explicit pauses requested by NVDA.
 Audio plays through NVDA's selected output device. Shift pauses or resumes;
 Control stops speech. The engine finishes its current calculation before
 starting replacement speech, so responsiveness depends on the processor.

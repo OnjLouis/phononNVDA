@@ -14,7 +14,7 @@ from logHandler import log
 from speech.commands import BreakCommand, CharacterModeCommand, IndexCommand, PitchCommand, LangChangeCommand
 from synthDriverHandler import SynthDriver as BaseSynth, VoiceInfo, synthDoneSpeaking, synthIndexReached
 
-from ._audio import Processor, percent
+from ._audio import PAUSE_LENGTHS, PauseAdjuster, Processor, percent
 from ._runtime import Engine, MODEL, SAMPLE_RATE, available, language
 from ._sequence import events
 from . import _imports, _settings
@@ -28,6 +28,7 @@ class SynthDriver(BaseSynth):
         DriverSetting("locale", "Language &filter", availableInSettingsRing=True, defaultVal="all"),
         BaseSynth.VoiceSetting(), BaseSynth.RateSetting(), BaseSynth.RateBoostSetting(),
         BaseSynth.PitchSetting(), BaseSynth.VolumeSetting(),
+        DriverSetting("pauseLength", "Pa&use length", availableInSettingsRing=True, defaultVal="default"),
     )
     supportedCommands = {IndexCommand, PitchCommand, BreakCommand, CharacterModeCommand, LangChangeCommand}
     supportedNotifications = {synthIndexReached, synthDoneSpeaking}
@@ -49,6 +50,7 @@ class SynthDriver(BaseSynth):
         self._voice = "Freya" if "Freya" in self._voices else next(iter(self._voices))
         self._locale = "all"
         self._rate, self._pitch, self._volume, self._rateBoost = 50, 50, 100, False
+        self._pauseLength = "default"
         self._lock = threading.Lock()
         self._control = threading.RLock()
         self._epoch = threading.Event()
@@ -191,6 +193,16 @@ class SynthDriver(BaseSynth):
     def _set_rateBoost(self, value):
         self._rateBoost = bool(value)
 
+    # NVDA builds this property name using setting.id.capitalize().
+    def _get_availablePauselengths(self):
+        return OrderedDict((mode, StringParameterInfo(mode, label)) for mode, label in PAUSE_LENGTHS.items())
+
+    def _get_pauseLength(self):
+        return self._pauseLength
+
+    def _set_pauseLength(self, value):
+        self._pauseLength = value if value in PAUSE_LENGTHS else "default"
+
     def _current(self, epoch):
         return not epoch.is_set() and not self._stopping.is_set()
 
@@ -201,7 +213,7 @@ class SynthDriver(BaseSynth):
                 if self._stopping.is_set():
                     return
                 self._latest_job += 1
-                settings = (self._voice, self._rate, self._pitch, self._volume, self._rateBoost)
+                settings = (self._voice, self._rate, self._pitch, self._volume, self._rateBoost, self._pauseLength)
                 self._jobs.put((self._epoch, self._latest_job, settings, prepared))
 
     def cancel(self):
@@ -240,7 +252,7 @@ class SynthDriver(BaseSynth):
             synthDoneSpeaking.notify(synth=self)
 
     def _render(self, engine, epoch, job, settings, prepared):
-        voice, rate, pitch, volume, boost = settings
+        voice, rate, pitch, volume, boost, pause_length = settings
         locale = self._voice_language(voice)
         for kind, value in prepared:
             if not self._current(epoch):
@@ -255,16 +267,21 @@ class SynthDriver(BaseSynth):
                 self._feed(epoch, b"\0\0" * (SAMPLE_RATE * value // 1000))
             elif kind == "text":
                 processor = Processor(rate, pitch, volume, boost)
+                pauses = PauseAdjuster(pause_length, volume) if volume and pause_length != "default" else None
 
                 def consume(pcm, count):
                     if not self._current(epoch):
                         return False
                     data = processor.process(pcm, count)
+                    if pauses is not None:
+                        data = pauses.process(data)
                     return self._feed(epoch, data) if data else self._current(epoch)
 
                 engine.speak(value, voice, locale, epoch, consume)
                 if self._current(epoch):
                     tail = processor.finish()
+                    if pauses is not None:
+                        tail = pauses.process(tail) + pauses.finish()
                     if tail:
                         self._feed(epoch, tail)
         self._feed(epoch, callback=lambda: self._done(epoch, job))
