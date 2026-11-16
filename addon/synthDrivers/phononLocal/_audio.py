@@ -13,7 +13,11 @@ class Processor:
         _sonic.initialize()
         self._mute = percent(volume) == 0
         self._stream = _sonic.SonicStream(SAMPLE_RATE, 1)
-        self._stream.speed = 2 ** ((percent(rate) - 50) / 50) * (2 if boost else 1)
+        position = (percent(rate) - 50) / 50
+        if boost:
+            self._stream.speed = 2 ** (position + 1)
+        else:
+            self._stream.speed = (3 if position > 0 else 2) ** position
         self._stream.pitch = 2 ** ((percent(pitch) - 50) / 100)
         self._stream.volume = percent(volume) / 100
 

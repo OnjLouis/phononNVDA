@@ -86,6 +86,21 @@ sys.modules.update({"config": config, "globalVars": types.SimpleNamespace(appArg
 driver_module = importlib.import_module("synthDrivers.phononLocal")
 
 
+class AudioRateTests(unittest.TestCase):
+    def test_normal_rate_has_more_headroom_without_changing_boost(self):
+        audio = importlib.import_module("synthDrivers.phononLocal._audio")
+        stream = types.SimpleNamespace()
+        sonic = types.SimpleNamespace(initialize=lambda: None, SonicStream=lambda *_: stream)
+        with patch.dict(sys.modules, {"synthDrivers._sonic": sonic}):
+            for rate, boost, speed in (
+                (0, False, 0.5), (50, False, 1), (75, False, 3 ** 0.5), (100, False, 3),
+                (25, True, 2 ** 0.5), (50, True, 2), (100, True, 4),
+            ):
+                audio.Processor(rate, 50, 100, boost)
+                self.assertAlmostEqual(stream.speed, speed, msg=(rate, boost))
+                self.assertEqual((stream.pitch, stream.volume), (1, 1))
+
+
 class FakeEngine:
     calls = []
     started = threading.Event()

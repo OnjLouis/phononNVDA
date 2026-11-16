@@ -6,6 +6,11 @@ included, with no first-use download required.
 
 ## Changelog
 
+### 1.0.5
+
+- Higher Rate settings speak faster without Rate Boost. Rates at or below
+  50 and the existing Rate Boost curve are unchanged.
+
 ### 1.0.4
 
 - Import compatible Phonon voice files and use them in the synth ring or Speech settings.
