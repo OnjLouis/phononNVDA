@@ -23,6 +23,9 @@ an imported voice. The native engine replaces one reserved voice slot rather
 than accumulating a separate loaded tensor for every import. The patch uses
 the same MIT OR Apache-2.0 terms as the upstream runtime.
 
+Apply `ptts-english-sterling.patch` after the voice-import patch. It corrects
+UK currency in English speech and includes preprocessing regression tests.
+
 Unpack the `xn` 0.2.11 crate into `xn` inside that source tree, then apply
 `xn-vulkan.patch` inside it. The workspace patch selects that copy. It fixes
 native cleanup after failed Vulkan initialization, buffer allocation and

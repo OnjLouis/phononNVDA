@@ -1,0 +1,61 @@
+--- a/ptts/src/preprocess/rewrite/currency.rs
++++ b/ptts/src/preprocess/rewrite/currency.rs
+@@ -91,7 +91,9 @@
+     // stay identical to the ones the serving stack already speaks. The cent sign is newer than
+     // that, so "1¢" reads "1 cent".
+     let (one, many) = currency.name(lang);
+-    let name = if currency == Currency::Cent && amount == "1" { one } else { many };
++    let singular = amount == "1"
++        && (currency == Currency::Cent || (lang == Lang::En && currency == Currency::Pound));
++    let name = if singular { one } else { many };
+     Some(format!("{}{suffix}", with_name(&spoken, name, lang)))
+ }
+ 
+@@ -197,10 +199,11 @@
+     if cents == "00" {
+         return Some(units);
+     }
+-    // "05" is read "5". The subdivision is always plural, and English says cents even for
+-    // pounds: quirks again, kept for the same reason as the plural above.
++    // "05" is spoken as "5"; sterling is the only subdivision with a new singular rule.
+     let cents = cents.strip_prefix('0').unwrap_or(cents);
+     let (and, cent) = match (lang, currency) {
++        (Lang::En, Currency::Pound) if cents == "1" => ("and", "penny"),
++        (Lang::En, Currency::Pound) => ("and", "pence"),
+         (Lang::Fr, Currency::Euro) => ("et", "centimes"),
+         (Lang::Fr, _) => ("et", "cents"),
+         _ => ("and", "cents"),
+@@ -234,6 +237,24 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++
++    #[test]
++    fn english_sterling_uses_pounds_and_pence() {
++        for (text, expected) in [
++            ("\u{a3}35.17", "35 pounds and 17 pence"),
++            ("\u{a3}1.01", "1 pound and 1 penny"),
++            ("\u{a3}0.01", "1 penny"),
++            ("\u{a3}0.05", "5 pence"),
++            ("\u{a3}1", "1 pound"),
++            ("\u{a3}1.00", "1 pound"),
++            ("\u{a3}1,234.56!", "1 thousand 234 pounds and 56 pence!"),
++            ("35.17\u{a3}", "35 pounds and 17 pence"),
++            ("$35.17", "35 dollars and 17 cents"),
++            ("\u{20ac}35.17", "35 euros and 17 cents"),
++        ] {
++            assert_eq!(currency(text, Lang::En).as_deref(), Some(expected), "{text}");
++        }
++    }
+ 
+     #[test]
+     fn amounts_are_read_with_their_currency() {
+@@ -250,7 +271,7 @@
+             (Lang::En, "$3.14", "3 dollars and 14 cents"),
+             (Lang::En, "$0.00", "0 dollars"),
+             (Lang::En, "$1", "1 dollars"),
+-            (Lang::En, "£1.50", "1 pound and 50 cents"),
++            (Lang::En, "£1.50", "1 pound and 50 pence"),
+             (Lang::Fr, "$4,59", "4 dollars et 59 cents"),
+             (Lang::Fr, "$0,01", "1 cents"),
+             (Lang::Fr, "$1,00", "1 dollar"),

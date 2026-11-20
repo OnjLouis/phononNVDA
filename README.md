@@ -6,6 +6,10 @@ included, with no first-use download required.
 
 ## Changelog
 
+### 1.0.7
+
+- English speech reads UK currency in pounds and pence, including "one penny."
+
 ### 1.0.6
 
 - Added **Pause length** to Speech settings and the synth ring. Use **Shorter**
