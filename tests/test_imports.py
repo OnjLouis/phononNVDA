@@ -41,6 +41,16 @@ class ImportStoreTests(unittest.TestCase):
             _imports.remove_voice(self.root, "..")
         self.assertTrue(self.source.exists())
 
+    def test_language_edit_keeps_voice_id_and_tensor(self):
+        voice = _imports.add_voice(self.root, self.source, "Test", "fr_FR", lambda _: None)
+        edited = _imports.update_locale(self.root, voice.id, "en_GB")
+        self.assertEqual((edited.id, edited.name, edited.locale), (voice.id, voice.name, "en_GB"))
+        self.assertEqual(_imports.read_voice(self.root, voice.id), b"voice bytes")
+        self.assertEqual(_imports.list_voices(self.root), (edited,))
+        with self.assertRaises(ValueError):
+            _imports.update_locale(self.root, voice.id, "xx_XX")
+        self.assertEqual(_imports.list_voices(self.root), (edited,))
+
     def test_oversized_file_is_rejected_before_native_validation(self):
         self.source.write_bytes(b"x" * 5)
         with patch.object(_imports, "MAX_BYTES", 4), self.assertRaises(ValueError):

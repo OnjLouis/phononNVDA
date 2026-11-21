@@ -6,6 +6,11 @@ included, with no first-use download required.
 
 ## Changelog
 
+### 1.0.8
+
+- Preview a voice before importing it and change an imported voice's language without replacing it.
+- The Phonon panel reports built-in and imported voice counts alongside the active backend. Check for updates now directly follows the update frequency.
+
 ### 1.0.7
 
 - English speech reads UK currency in pounds and pence, including "one penny."
@@ -65,7 +70,10 @@ translate text. The model supports the five languages listed above.
 
 To add a voice exported from [Gradium Studio](https://github.com/gradium-ai/xn-ptts#download-a-voice-from-gradium-studio),
 open NVDA Settings, Phonon, then **Manage imported voices**. Choose **Add voice**,
-select the `.safetensors` file, name the voice and select its spoken language.
+select the `.safetensors` file, and use **Preview voice** before saving it.
+Preview uses English until you choose a language. Select its spoken language
+and enter a name to import. To correct the language later, select the import
+and choose **Change language**. This keeps the same voice and settings.
 You can then select it like a built-in voice. Imports stay in the NVDA profile
 and are not uploaded. **Remove voice** removes Phonon's copy, not the original.
 
@@ -83,8 +91,8 @@ access. Keep a familiar alternative synthesizer available.
 
 ## Settings and Updates
 
-The Phonon settings panel contains GPU acceleration, Synthesis backend, Check for updates, Check
-for updates now and Help. Update intervals are Never, Hourly or Daily; Daily is the
+The Phonon settings panel contains GPU acceleration, Status, Manage imported voices,
+Check for updates, Check for updates now and Help. Update intervals are Never, Hourly or Daily; Daily is the
 default. Help opens this manual.
 
 **Use GPU acceleration when available** is checked by default. Phonon uses a
@@ -98,7 +106,7 @@ uses the CPU, without a popup or spoken warning. The reason is recorded once in
 the NVDA log, and GPU initialization is not retried until NVDA restarts. No
 graphics driver is downloaded or installed. CPU speech remains available without a GPU.
 
-**Synthesis backend** reports the running engine, rather than just whether a
+**Status** lists built-in and imported voice counts and reports the running engine, rather than just whether a
 GPU is present. It distinguishes GPU (Vulkan), CPU with GPU disabled, and CPU
 fallback after unsuccessful GPU initialization. If Phonon is not selected, no
 backend is assumed. The field updates only while this settings panel is open.

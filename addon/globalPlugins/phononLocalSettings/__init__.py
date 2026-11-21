@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 import os
 from pathlib import Path
+import threading
 
 import addonHandler
+import config
 import globalPluginHandler
 import globalVars
 import gui
@@ -11,8 +13,11 @@ import gui.settingsDialogs
 import wx
 import synthDriverHandler
 import languageHandler
+import nvwave
+from logHandler import log
 
-from synthDrivers.phononLocal import _imports, _runtime, _settings
+from synthDrivers.phononLocal import GROUPS, normalise, stock_voice_files, _imports, _runtime, _settings
+from synthDrivers.phononLocal._audio import Processor
 from ._updater import GitHubReleaseUpdater
 
 addonHandler.initTranslation()
@@ -23,6 +28,111 @@ def _reportVoiceError(message):
     gui.messageBox(message, _("Phonon voices"), wx.OK | wx.ICON_ERROR)
 
 
+_SAMPLES = {
+    "en": "Hello. This is a preview of the selected voice.",
+    "fr": "Bonjour. Voici un extrait de la voix choisie.",
+    "de": "Guten Tag. So klingt die ausgewählte Stimme.",
+    "es": "Hola. Así suena la voz seleccionada.",
+    "pt": "Olá. Esta é uma amostra da voz selecionada.",
+}
+
+
+def _voiceDetails(parent, locales, name, data, existing=None):
+    with wx.Dialog(parent, title=_("Change voice language") if existing else _("Import voice")) as form:
+        helper = gui.guiHelper.BoxSizerHelper(form, orientation=wx.VERTICAL)
+        naming = None
+        if not existing:
+            naming = helper.addLabeledControl(_("&Voice name:"), wx.TextCtrl)
+            naming.SetValue(name)
+        languages = [_("Choose a language")] + [languageHandler.getLanguageDescription(code) or code for code in locales]
+        choice = helper.addLabeledControl(_("Spoken &language:"), wx.Choice, choices=languages)
+        choice.SetSelection(locales.index(existing) + 1 if existing else 0)
+        play = helper.addItem(wx.Button(form, label=_("&Preview voice")))
+        stop = helper.addItem(wx.Button(form, label=_("&Stop preview")))
+        stop.Disable()
+        save = helper.addItem(wx.Button(form, wx.ID_OK, label=_("Sa&ve") if existing else _("&Import")))
+        helper.addItem(wx.Button(form, wx.ID_CANCEL, label=_("&Cancel")))
+        form.SetSizerAndFit(helper.sizer)
+        cancel = threading.Event()
+        player = None
+        closed = False
+
+        def stopPreview(event=None):
+            cancel.set()
+            if player is not None:
+                player.stop()
+
+        def finish(failure):
+            nonlocal player
+            if closed:
+                return
+            player = None
+            play.Enable()
+            stop.Disable()
+            if failure and not cancel.is_set():
+                _reportVoiceError(_("Phonon could not preview this voice."))
+
+        def start(event):
+            nonlocal player
+            selected = choice.GetSelection()
+            locale = locales[selected - 1] if selected > 0 else "en_US"
+            sample = _SAMPLES.get(locale.split("_")[0], _SAMPLES["en"])
+            device = config.conf["audio"]["outputDevice"]
+            player = nvwave.WavePlayer(1, _runtime.SAMPLE_RATE, 16, outputDevice=device)
+            output = player
+            cancel.clear()
+            play.Disable()
+            stop.Enable()
+            stop.SetFocus()
+
+            def run():
+                engine = None
+                failed = False
+                try:
+                    engine = _runtime.Engine()
+                    processor = Processor(50, 50, 100, False)
+
+                    def feed(pcm, count):
+                        if cancel.is_set():
+                            return False
+                        audio = processor.process(pcm, count)
+                        if audio:
+                            output.feed(audio)
+                        return not cancel.is_set()
+
+                    engine.speak(sample, "", locale, cancel, feed, draft=data)
+                    if not cancel.is_set():
+                        output.feed(processor.finish())
+                        output.idle()
+                except Exception:
+                    failed = True
+                    log.exception("Phonon voice preview failed")
+                finally:
+                    if engine is not None:
+                        engine.close()
+                    output.close()
+                    wx.CallAfter(finish, failed)
+
+            threading.Thread(target=run, name="Phonon voice preview", daemon=True).start()
+
+        def updateSave(event=None):
+            save.Enable(choice.GetSelection() > 0 and (naming is None or bool(naming.GetValue().strip())))
+
+        play.Bind(wx.EVT_BUTTON, start)
+        stop.Bind(wx.EVT_BUTTON, stopPreview)
+        choice.Bind(wx.EVT_CHOICE, updateSave)
+        if naming is not None:
+            naming.Bind(wx.EVT_TEXT, updateSave)
+        updateSave()
+        (naming if naming is not None else choice).SetFocus()
+        try:
+            if form.ShowModal() == wx.ID_OK and choice.GetSelection() > 0:
+                return naming.GetValue() if naming is not None else name, locales[choice.GetSelection() - 1]
+        finally:
+            closed = True
+            stopPreview()
+
+
 def _manageVoices(parent):
     root = _imports.profile_root()
     dialog = wx.Dialog(parent, title=_("Manage imported Phonon voices"))
@@ -31,14 +141,17 @@ def _manageVoices(parent):
         voices = helper.addLabeledControl(_("&Imported voices:"), wx.ListBox)
         voices.SetName(_("Imported voices"))
         add = helper.addItem(wx.Button(dialog, label=_("&Add voice...")))
+        edit = helper.addItem(wx.Button(dialog, label=_("&Change language...")))
         remove = helper.addItem(wx.Button(dialog, label=_("&Remove voice")))
-        close = helper.addItem(wx.Button(dialog, wx.ID_CLOSE, label=_("&Close")))
+        close = helper.addItem(wx.Button(dialog, wx.ID_CLOSE, label=_("&Done")))
         dialog.SetEscapeId(wx.ID_CLOSE)
         dialog.SetSizerAndFit(helper.sizer)
         entries = ()
+        locales = sorted(_imports.LOCALES, key=lambda code: languageHandler.getLanguageDescription(code) or code)
 
         def updateRemoval(event=None):
             remove.Enable(voices.GetSelection() != wx.NOT_FOUND)
+            edit.Enable(remove.IsEnabled())
 
         def refresh(preferred=None):
             nonlocal entries
@@ -62,25 +175,30 @@ def _manageVoices(parent):
                 if picker.ShowModal() != wx.ID_OK:
                     return
                 path = Path(picker.GetPath())
-            with wx.TextEntryDialog(dialog, _("Voice name:"), _("Add Phonon voice"), path.stem[:_imports.MAX_NAME]) as naming:
-                if naming.ShowModal() != wx.ID_OK:
-                    return
-                name = naming.GetValue()
-            locales = sorted(_imports.LOCALES, key=lambda code: languageHandler.getLanguageDescription(code) or code)
-            with wx.SingleChoiceDialog(dialog, _("Choose the spoken language:"), _("Add Phonon voice"),
-                    [languageHandler.getLanguageDescription(code) or code for code in locales]) as selection:
-                if selection.ShowModal() != wx.ID_OK:
-                    return
-                index = selection.GetSelection()
-                if index == wx.NOT_FOUND:
-                    return
-                locale = locales[index]
             try:
-                voice = _imports.add_voice(root, path, name, locale, _runtime.validate_import)
+                data = _imports.read_source(path)
+                details = _voiceDetails(dialog, locales, path.stem[:_imports.MAX_NAME], data)
+                if details is None:
+                    return
+                voice = _imports.save_voice(root, data, *details, _runtime.validate_import)
             except (OSError, ValueError, _runtime.NativeError):
                 _reportVoiceError(_("Could not import this voice. Choose a compatible Phonon .safetensors file and enter a valid name."))
                 return
             refresh(voice.id)
+            voices.SetFocus()
+
+        def onEdit(event):
+            index = voices.GetSelection()
+            if not 0 <= index < len(entries):
+                return
+            voice = entries[index]
+            try:
+                details = _voiceDetails(dialog, locales, voice.name, _imports.read_voice(root, voice.id), voice.locale)
+                if details is not None:
+                    _imports.update_locale(root, voice.id, details[1])
+                    refresh(voice.id)
+            except (OSError, ValueError):
+                _reportVoiceError(_("Could not change the language of this voice."))
             voices.SetFocus()
 
         def onRemove(event):
@@ -100,6 +218,7 @@ def _manageVoices(parent):
 
         voices.Bind(wx.EVT_LISTBOX, updateRemoval)
         add.Bind(wx.EVT_BUTTON, onAdd)
+        edit.Bind(wx.EVT_BUTTON, onEdit)
         remove.Bind(wx.EVT_BUTTON, onRemove)
         close.Bind(wx.EVT_BUTTON, lambda event: dialog.EndModal(wx.ID_CLOSE))
         refresh()
@@ -117,20 +236,23 @@ class PhononSettingsPanel(gui.settingsDialogs.SettingsPanel):
         self.gpu = helper.addItem(wx.CheckBox(self, label=_("Use &GPU acceleration when available")))
         self.gpu.SetValue(_settings.use_gpu())
         # Windows skips read-only single-line text controls during Tab navigation.
-        self.backend = helper.addLabeledControl(_("Synthesis &backend:"), wx.TextCtrl,
+        self.backend = helper.addLabeledControl(_("&Status:"), wx.TextCtrl,
                                                style=wx.TE_READONLY | wx.TE_MULTILINE)
-        self.backend.SetName(_("Synthesis backend"))
+        self.backend.SetName(_("Status"))
         self.backend.SetValue("")
+        files = stock_voice_files()
+        self._stockCount = sum(normalise(name) in files for names in GROUPS.values() for name in names)
+        self.countImported()
         self.refreshBackend()
         self._backendTimer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self.refreshBackend, self._backendTimer)
         self.Bind(wx.EVT_WINDOW_DESTROY, self.onBackendDestroy)
+        self.imports = helper.addItem(wx.Button(self, label=_("&Manage imported voices...")))
+        self.imports.Bind(wx.EVT_BUTTON, self.onManage)
         self.interval = helper.addLabeledControl(_("Check for &updates:"), wx.Choice,
                                                choices=[_("Never"), _("Hourly"), _("Daily")])
         self.interval.SetName(_("Check for updates"))
         self.interval.SetSelection(_settings.INTERVALS.index(_settings.update_interval()))
-        self.imports = helper.addItem(wx.Button(self, label=_("&Manage imported voices...")))
-        self.imports.Bind(wx.EVT_BUTTON, lambda event: _manageVoices(self))
         self.check = helper.addItem(wx.Button(self, label=_("&Check for updates now")))
         self.check.Bind(wx.EVT_BUTTON, self.onCheck)
         self.help = helper.addItem(wx.Button(self, label=_("&Help")))
@@ -156,11 +278,26 @@ class PhononSettingsPanel(gui.settingsDialogs.SettingsPanel):
                 "failed": _("Phonon initialization or synthesis failed."),
                 "stopped": _("Phonon is stopped."),
             }.get(getattr(synth, "backendStatus", "unknown"), _("Current engine has not reported its backend."))
+        text = _("Built-in voices: {builtIn}. Imported voices: {imported}.").format(
+            builtIn=self._stockCount, imported=self._importCount
+        ) + "\n" + text
         if self.backend.GetValue() != text:
             self.backend.SetValue(text)
 
+    def countImported(self):
+        try:
+            self._importCount = len(_imports.list_voices(_imports.profile_root()))
+        except OSError:
+            self._importCount = _("Unavailable")
+
+    def onManage(self, event):
+        _manageVoices(self)
+        self.countImported()
+        self.refreshBackend()
+
     def onPanelActivated(self):
         super().onPanelActivated()
+        self.countImported()
         self.refreshBackend()
         self._backendTimer.Start(1000)
 

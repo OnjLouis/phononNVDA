@@ -21,6 +21,10 @@ from . import _imports, _settings
 from ._voice_languages import GROUPS, normalise
 
 
+def stock_voice_files():
+    return {normalise(path.stem): path.stem for path in (MODEL / "voices").glob("*.safetensors")}
+
+
 class SynthDriver(BaseSynth):
     name = "phononLocal"
     description = "Phonon"
@@ -41,7 +45,7 @@ class SynthDriver(BaseSynth):
         if not self.check():
             raise RuntimeError("Phonon's bundled model or supported 64-bit CPU runtime is unavailable.")
         super().__init__()
-        files = {normalise(path.stem): path.stem for path in (MODEL / "voices").glob("*.safetensors")}
+        files = stock_voice_files()
         self._stock_voices = OrderedDict((files[normalise(name)], VoiceInfo(files[normalise(name)], name, language=locale))
                                         for locale, names in GROUPS.items() for name in names if normalise(name) in files)
         if not self._stock_voices:
@@ -99,8 +103,12 @@ class SynthDriver(BaseSynth):
                 (v.id, v.displayName, v.language) for v in self._voices.values()]:
             return
         self.cancel()
+        previous = self._voices.get(self._voice)
         self._voices = voices
-        if self._locale not in self._get_availableLocales():
+        edited = voices.get(self._voice)
+        if previous and edited and previous.language != edited.language and self._locale == previous.language:
+            self._locale = edited.language
+        elif self._locale not in self._get_availableLocales():
             self._locale = "all"
         self._set_voice(self._voice)
         self.invalidateCache()

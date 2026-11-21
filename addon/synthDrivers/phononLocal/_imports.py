@@ -94,12 +94,21 @@ def read_voice(root, voice_id):
 
 
 def add_voice(root, source, name, locale, validate):
+    return save_voice(root, read_source(source), name, locale, validate)
+
+
+def read_source(source):
+    if source.suffix.lower() != ".safetensors":
+        raise ValueError("Invalid voice file")
+    return _read(source, MAX_BYTES)
+
+
+def save_voice(root, data, name, locale, validate):
     name = _name(name)
-    if root is None or locale not in LOCALES or source.suffix.lower() != ".safetensors":
+    if root is None or locale not in LOCALES or not 0 < len(data) <= MAX_BYTES:
         raise ValueError("Invalid voice file or language")
     if len(list_voices(root)) >= MAX_VOICES:
         raise ValueError("Too many imported voices")
-    data = _read(source, MAX_BYTES)
     validate(data)
     root.mkdir(parents=True, exist_ok=True)
     if not _ordinary(root, stat.S_ISDIR):
@@ -116,6 +125,22 @@ def add_voice(root, source, name, locale, validate):
                 (stage / file).unlink(missing_ok=True)
             stage.rmdir()
     return voice
+
+
+def update_locale(root, voice_id, locale):
+    voice = next((voice for voice in list_voices(root) if voice.id == voice_id), None)
+    if voice is None or locale not in LOCALES:
+        raise ValueError("Invalid imported voice or language")
+    if voice.locale == locale:
+        return voice
+    metadata = root / voice.id / _METADATA
+    stage = metadata.with_name(".locale-" + uuid4().hex)
+    try:
+        stage.write_text(json.dumps({"name": voice.name, "locale": locale}), encoding="utf-8")
+        stage.replace(metadata)
+    finally:
+        stage.unlink(missing_ok=True)
+    return Voice(voice.id, voice.name, locale)
 
 
 def remove_voice(root, voice_id):

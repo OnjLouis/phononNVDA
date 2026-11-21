@@ -170,13 +170,19 @@ class Engine:
         if not self._dll.ptts_set_voice(self._handle, voice.encode("utf-8")):
             raise NativeError("Phonon could not select the requested voice.")
 
-    def speak(self, text, voice, locale, cancel, sink):
+    def speak(self, text, voice, locale, cancel, sink, *, draft=None):
         self._check_owner()
         if cancel.is_set():
             return None
         if not self._handle or not text or len(text) > MAX_INPUT or "\0" in text:
             raise NativeError("The Phonon speech request is invalid.")
-        self._select_voice(voice)
+        if draft is None:
+            self._select_voice(voice)
+        else:
+            self._selected_import = None
+            select = getattr(self._dll, "ptts_set_imported_voice", None)
+            if select is None or not select(self._handle, draft, len(draft)):
+                raise NativeError("Phonon could not preview the selected voice.")
         if not self._dll.ptts_set_language(self._handle, language(locale).encode("ascii")):
             raise NativeError("Phonon could not select the requested language.")
         failure = []

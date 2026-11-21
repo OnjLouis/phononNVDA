@@ -81,8 +81,8 @@ class SettingsTests(unittest.TestCase):
 
     def test_gpu_updates_and_help_have_unique_mnemonics(self):
         labels = [control.label for control in self.panel.children]
-        self.assertEqual(labels, ["Use &GPU acceleration when available", "Synthesis &backend:", "Check for &updates:", "&Manage imported voices...", "&Check for updates now", "&Help"])
-        self.assertEqual([label.split("&", 1)[1][0].lower() for label in labels], ["g", "b", "u", "m", "c", "h"])
+        self.assertEqual(labels, ["Use &GPU acceleration when available", "&Status:", "&Manage imported voices...", "Check for &updates:", "&Check for updates now", "&Help"])
+        self.assertEqual([label.split("&", 1)[1][0].lower() for label in labels], ["g", "s", "m", "u", "c", "h"])
         self.assertFalse(self.panel.gpu.GetValue())
         self.assertEqual(self.panel.interval.name, "Check for updates")
         self.assertEqual(self.panel.interval.choices, ["Never", "Hourly", "Daily"])
@@ -101,7 +101,7 @@ class SettingsTests(unittest.TestCase):
 
     def test_backend_is_read_only_and_tabbable_after_gpu(self):
         self.assertEqual(self.panel.backend.style, self.module.wx.TE_READONLY | self.module.wx.TE_MULTILINE)
-        self.assertEqual(self.panel.children[:3], [self.panel.gpu, self.panel.backend, self.panel.interval])
+        self.assertEqual(self.panel.children[:3], [self.panel.gpu, self.panel.backend, self.panel.imports])
 
     def test_backend_refresh_does_not_rewrite_unchanged_text(self):
         original = self.panel.backend.SetValue
