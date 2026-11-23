@@ -21,6 +21,14 @@ from . import _imports, _settings
 from ._voice_languages import GROUPS, normalise
 
 
+# Temperature scales sampling variation; it does not select a speaking style.
+VOICE_VARIATIONS = {
+    "less": ("Less", 0.1),
+    "default": ("Default", 0.3),
+    "more": ("More", 0.7),
+}
+
+
 def stock_voice_files():
     return {normalise(path.stem): path.stem for path in (MODEL / "voices").glob("*.safetensors")}
 
@@ -33,6 +41,7 @@ class SynthDriver(BaseSynth):
         BaseSynth.VoiceSetting(), BaseSynth.RateSetting(), BaseSynth.RateBoostSetting(),
         BaseSynth.PitchSetting(), BaseSynth.VolumeSetting(),
         DriverSetting("pauseLength", "Pa&use length", availableInSettingsRing=True, defaultVal="default"),
+        DriverSetting("voiceVariation", "Voice variatio&n", availableInSettingsRing=True, defaultVal="default"),
     )
     supportedCommands = {IndexCommand, PitchCommand, BreakCommand, CharacterModeCommand, LangChangeCommand}
     supportedNotifications = {synthIndexReached, synthDoneSpeaking}
@@ -55,6 +64,7 @@ class SynthDriver(BaseSynth):
         self._locale = "all"
         self._rate, self._pitch, self._volume, self._rateBoost = 50, 50, 100, False
         self._pauseLength = "default"
+        self._voiceVariation = "default"
         self._lock = threading.Lock()
         self._control = threading.RLock()
         self._epoch = threading.Event()
@@ -63,6 +73,8 @@ class SynthDriver(BaseSynth):
         self._latest_job = 0
         self._jobs = queue.Queue()
         self._useGpu = _settings.use_gpu()
+        self._gpuAdapter = _settings.gpu_adapter()
+        self.backendGpuName = ""
         self._backendState = "starting"
         self._player = nvwave.WavePlayer(1, SAMPLE_RATE, 16, outputDevice=config.conf["audio"]["outputDevice"])
         self._worker = threading.Thread(target=self._run, name="Phonon native speech", daemon=True)
@@ -211,6 +223,16 @@ class SynthDriver(BaseSynth):
     def _set_pauseLength(self, value):
         self._pauseLength = value if value in PAUSE_LENGTHS else "default"
 
+    def _get_availableVoicevariations(self):
+        return OrderedDict((mode, StringParameterInfo(mode, label))
+                           for mode, (label, _) in VOICE_VARIATIONS.items())
+
+    def _get_voiceVariation(self):
+        return self._voiceVariation
+
+    def _set_voiceVariation(self, value):
+        self._voiceVariation = value if value in VOICE_VARIATIONS else "default"
+
     def _current(self, epoch):
         return not epoch.is_set() and not self._stopping.is_set()
 
@@ -221,7 +243,8 @@ class SynthDriver(BaseSynth):
                 if self._stopping.is_set():
                     return
                 self._latest_job += 1
-                settings = (self._voice, self._rate, self._pitch, self._volume, self._rateBoost, self._pauseLength)
+                settings = (self._voice, self._rate, self._pitch, self._volume, self._rateBoost,
+                            self._pauseLength, self._voiceVariation)
                 self._jobs.put((self._epoch, self._latest_job, settings, prepared))
 
     def cancel(self):
@@ -260,7 +283,10 @@ class SynthDriver(BaseSynth):
             synthDoneSpeaking.notify(synth=self)
 
     def _render(self, engine, epoch, job, settings, prepared):
-        voice, rate, pitch, volume, boost, pause_length = settings
+        if not self._current(epoch):
+            return
+        voice, rate, pitch, volume, boost, pause_length, voice_variation = settings
+        engine.set_temperature(VOICE_VARIATIONS[voice_variation][1])
         locale = self._voice_language(voice)
         for kind, value in prepared:
             if not self._current(epoch):
@@ -318,10 +344,13 @@ class SynthDriver(BaseSynth):
         engine = None
         try:
             start = time.monotonic()
-            engine = Engine(use_gpu=self._useGpu)
+            engine = Engine(use_gpu=self._useGpu, gpu_adapter=self._gpuAdapter)
+            self.backendGpuName = engine.gpu_name
             self._backendState = {"GPU (Vulkan)": "gpu", "CPU": "cpu-fallback" if self._useGpu else "cpu"}.get(engine.backend, "unknown")
             log.info("Phonon %s engine ready: %d voices; load %.3f s.", engine.backend,
                      len(self._voices), time.monotonic() - start)
+            if self.backendGpuName:
+                log.info("Phonon graphics adapter: %s", self.backendGpuName)
             while True:
                 job = self._jobs.get()
                 try:

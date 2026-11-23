@@ -235,6 +235,13 @@ class PhononSettingsPanel(gui.settingsDialogs.SettingsPanel):
         helper = gui.guiHelper.BoxSizerHelper(self, sizer=settingsSizer)
         self.gpu = helper.addItem(wx.CheckBox(self, label=_("Use &GPU acceleration when available")))
         self.gpu.SetValue(_settings.use_gpu())
+        self._adapterScanStarted = False
+        self._adapterDestroyed = False
+        self._adapterIds = [_settings.gpu_adapter()]
+        self.adapter = helper.addLabeledControl(_("Graphics &adapter:"), wx.Choice, choices=[])
+        self.adapter.SetName(_("Graphics adapter"))
+        self.applyGraphicsAdapters([])
+        self.gpu.Bind(wx.EVT_CHECKBOX, self.onGraphicsAcceleration)
         # Windows skips read-only single-line text controls during Tab navigation.
         self.backend = helper.addLabeledControl(_("&Status:"), wx.TextCtrl,
                                                style=wx.TE_READONLY | wx.TE_MULTILINE)
@@ -260,6 +267,9 @@ class PhononSettingsPanel(gui.settingsDialogs.SettingsPanel):
 
     def onSave(self):
         _settings.save_use_gpu(self.gpu.GetValue())
+        index = self.adapter.GetSelection()
+        if 0 <= index < len(self._adapterIds):
+            _settings.save_gpu_adapter(self._adapterIds[index])
         value = _settings.INTERVALS[self.interval.GetSelection()]
         _settings.save_interval(value)
         if _updater is not None:
@@ -278,6 +288,9 @@ class PhononSettingsPanel(gui.settingsDialogs.SettingsPanel):
                 "failed": _("Phonon initialization or synthesis failed."),
                 "stopped": _("Phonon is stopped."),
             }.get(getattr(synth, "backendStatus", "unknown"), _("Current engine has not reported its backend."))
+            gpu_name = getattr(synth, "backendGpuName", "")
+            if gpu_name and getattr(synth, "backendStatus", "") == "gpu":
+                text = _("GPU (Vulkan): {name}.").format(name=gpu_name)
         text = _("Built-in voices: {builtIn}. Imported voices: {imported}.").format(
             builtIn=self._stockCount, imported=self._importCount
         ) + "\n" + text
@@ -300,6 +313,37 @@ class PhononSettingsPanel(gui.settingsDialogs.SettingsPanel):
         self.countImported()
         self.refreshBackend()
         self._backendTimer.Start(1000)
+        self.onGraphicsAcceleration(None)
+
+    def onGraphicsAcceleration(self, event):
+        enabled = self.gpu.GetValue()
+        self.adapter.Enable(enabled and len(self._adapterIds) > 1)
+        if not enabled or self._adapterScanStarted:
+            return
+        self._adapterScanStarted = True
+
+        def scan():
+            try:
+                adapters = _runtime.gpu_adapters()
+            except (OSError, _runtime.NativeError) as error:
+                log.info("Phonon could not list graphics adapters: %s", error)
+                adapters = []
+            wx.CallAfter(self.applyGraphicsAdapters, adapters)
+
+        threading.Thread(target=scan, daemon=True, name="Phonon graphics adapters").start()
+
+    def applyGraphicsAdapters(self, adapters):
+        if self._adapterDestroyed:
+            return
+        index = self.adapter.GetSelection()
+        selected = self._adapterIds[index] if 0 <= index < len(self._adapterIds) else self._adapterIds[0]
+        choices = [("", _("Automatic")), *adapters]
+        if selected and selected not in {adapter_id for adapter_id, _ in choices}:
+            choices.append((selected, _("Previously selected GPU (unavailable)")))
+        self._adapterIds = [adapter_id for adapter_id, _ in choices]
+        self.adapter.SetItems([name for _, name in choices])
+        self.adapter.SetSelection(self._adapterIds.index(selected))
+        self.adapter.Enable(self.gpu.GetValue() and len(choices) > 1)
 
     def onPanelDeactivated(self):
         self._backendTimer.Stop()
@@ -307,6 +351,7 @@ class PhononSettingsPanel(gui.settingsDialogs.SettingsPanel):
 
     def onBackendDestroy(self, event):
         if event.GetEventObject() is self:
+            self._adapterDestroyed = True
             self._backendTimer.Stop()
         event.Skip()
 

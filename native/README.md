@@ -32,13 +32,23 @@ native cleanup after failed Vulkan initialization, buffer allocation and
 pipeline creation. The accompanying native tests use an isolated mock driver.
 Both native patches are provided under MIT OR Apache-2.0, matching upstream.
 
+Apply `ptts-vulkan-adapters.patch` at the source root after the other patches.
+It exposes adapter discovery and selection and retries compatible mapped
+memory types on an out-of-device-memory error from the preferred type.
+
+Apply `ptts-temperature.patch` last. It backports the desktop sampling
+temperature export from Gradium's merged [PR 314](https://github.com/gradium-ai/xn-ptts/pull/314)
+(David Blum, MIT OR Apache-2.0), without changing the sampling seed or adding
+a new runtime dependency.
+
 Build `ptts-ffi` in release mode with a Rust Windows toolchain. This candidate
 uses Rust 1.98.0's `x86_64-pc-windows-gnullvm` toolchain and LLVM-MinGW, with
 `-C target-cpu=x86-64-v3` and stripped symbols. Remap build paths when compiling
 redistributable binaries. Do not use the upstream native-CPU default for a
 portable distribution.
 
-Enable `ptts/vulkan` when building `ptts-ffi`. The build requires `glslc` on
+Enable `vulkan-adapters` when building `ptts-ffi` to include the adapter API.
+The build requires `glslc` on
 PATH to compile xn's shaders. They are embedded in the DLL; end users need
 only a compatible installed Vulkan graphics driver, not a compiler or SDK.
 

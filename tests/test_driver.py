@@ -133,12 +133,18 @@ class AudioRateTests(unittest.TestCase):
 
 class FakeEngine:
     calls = []
+    temperatures = []
     started = threading.Event()
     closed = []
 
-    def __init__(self, use_gpu=False):
+    def __init__(self, use_gpu=False, gpu_adapter=""):
         self.owner = threading.get_ident()
         self.backend = 'GPU (Vulkan)' if use_gpu else 'CPU'
+        self.gpu_name = 'Fixture GPU' if use_gpu else ''
+
+    def set_temperature(self, temperature):
+        assert self.owner == threading.get_ident()
+        self.temperatures.append(temperature)
     def speak(self, text, voice, locale, cancel, sink):
         self.calls.append((text, voice, locale))
         if text == "block":
@@ -207,6 +213,7 @@ class DriverTests(unittest.TestCase):
             patched = patch.object(driver_module, name, value)
             patched.start(); self.addCleanup(patched.stop)
         FakeEngine.calls, FakeEngine.closed = [], []
+        FakeEngine.temperatures = []
         FakeEngine.started.clear()
         notice.items.clear(); done.items.clear()
         self.driver = driver_module.SynthDriver()
@@ -234,6 +241,22 @@ class DriverTests(unittest.TestCase):
             self.driver._player.drain()
             self.assertEqual(notice.items[-1]["index"], 7)
 
+    def test_voice_variation_is_named_and_captured_with_each_request(self):
+        self.assertEqual(self.driver.voiceVariation, "default")
+        setting = next(s for s in self.driver.supportedSettings if s and s.id == "voiceVariation")
+        self.assertTrue(setting.availableInSettingsRing)
+        choices = getattr(self.driver, f"available{setting.id.capitalize()}s")
+        self.assertEqual(list(choices), ["less", "default", "more"])
+        self.assertEqual([item.displayName for item in choices.values()], ["Less", "Default", "More"])
+        self.driver.speak(["block"])
+        self.assertTrue(FakeEngine.started.wait(2))
+        for mode in ("less", "more", "unrecognized"):
+            self.driver.voiceVariation = mode
+            self.driver.speak(["next"])
+        wait_for(lambda: len(FakeEngine.calls) == 4)
+        self.assertEqual(self.driver.voiceVariation, "default")
+        self.assertEqual(FakeEngine.temperatures, [0.3, 0.1, 0.7, 0.3])
+
     def test_backend_status_reports_initialized_cpu(self):
         self.assertTrue(hasattr(self.driver, "backendStatus"))
         wait_for(lambda: self.driver.backendStatus != "starting")
@@ -241,7 +264,7 @@ class DriverTests(unittest.TestCase):
 
     def test_backend_status_distinguishes_gpu_and_cpu_fallback(self):
         class CpuFallback(FakeEngine):
-            def __init__(self, use_gpu=False):
+            def __init__(self, use_gpu=False, gpu_adapter=""):
                 super().__init__(use_gpu=False)
         for engine, expected in ((FakeEngine, "gpu"), (CpuFallback, "cpu-fallback")):
             with self.subTest(expected=expected), patch.object(driver_module, "Engine", engine), \

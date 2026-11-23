@@ -6,6 +6,12 @@ included, with no first-use download required.
 
 ## Changelog
 
+### 1.0.9
+
+- Choose a graphics adapter in Phonon settings. Status identifies the adapter in use.
+- Improved GPU initialization on drivers that offer more than one compatible memory type.
+- Use Voice variation in Speech settings or the synth ring to try less or more expression while leaving the default unchanged.
+
 ### 1.0.8
 
 - Preview a voice before importing it and change an imported voice's language without replacing it.

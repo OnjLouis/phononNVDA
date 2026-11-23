@@ -18,11 +18,13 @@ LANGUAGES = frozenset(("en", "fr", "de", "es", "pt"))
 MODEL = Path(__file__).resolve().parents[2] / "data" / "phonon"
 BIN = Path(__file__).resolve().parent / "bin"
 FRAME = C.CFUNCTYPE(C.c_bool, C.POINTER(C.c_float), C.c_size_t, C.c_void_p)
+ADAPTER = C.CFUNCTYPE(None, C.c_void_p, C.c_char_p, C.c_void_p)
+ADAPTER_ID_BYTES = 16
 _DLL = None
 _DLL_LOCK = threading.Lock()
 _VULKAN = None
 _GPU_INIT_LOCK = threading.Lock()
-_GPU_UNAVAILABLE = False
+_GPU_UNAVAILABLE = set()
 
 
 def _vulkan_loader():
@@ -67,9 +69,13 @@ def _library():
             library = C.CDLL(str(BIN / "ptts_ffi.dll"))
         for name, result, arguments in (
             ("ptts_new", C.c_void_p, [C.c_char_p, C.c_uint32, C.c_char_p]),
+            ("ptts_new_vulkan", C.c_void_p, [C.c_char_p, C.c_char_p, C.c_char_p]),
+            ("ptts_vulkan_adapters", C.c_bool, [ADAPTER, C.c_void_p]),
+            ("ptts_vulkan_name", C.c_char_p, [C.c_void_p]),
             ("ptts_speak", C.c_bool, [C.c_void_p, C.c_char_p, FRAME, C.c_void_p, C.POINTER(Result)]),
             ("ptts_set_voice", C.c_bool, [C.c_void_p, C.c_char_p]),
             ("ptts_set_language", C.c_bool, [C.c_void_p, C.c_char_p]),
+            ("ptts_set_temperature", C.c_bool, [C.c_void_p, C.c_float]),
             ("ptts_last_error", C.c_char_p, [C.c_void_p]),
             ("ptts_free", None, [C.c_void_p]),
         ):
@@ -87,6 +93,24 @@ def _library():
         return library
 
 
+def gpu_adapters():
+    if not supported():
+        return []
+    _vulkan_loader()
+    library = _library()
+    adapters = []
+
+    @ADAPTER
+    def visit(adapter_id, name, user):
+        label = (name or b"").decode("utf-8", errors="replace").strip()
+        if adapter_id and label:
+            adapters.append((C.string_at(adapter_id, ADAPTER_ID_BYTES).hex(), label))
+
+    if not library.ptts_vulkan_adapters(visit, None):
+        raise NativeError("Vulkan could not list graphics adapters.")
+    return adapters
+
+
 def validate_import(data):
     validate = getattr(_library(), "ptts_validate_imported_voice", None)
     if validate is None or not validate(str(MODEL).encode("utf-8"), data, len(data)):
@@ -94,29 +118,31 @@ def validate_import(data):
 
 
 class Engine:
-    def __init__(self, model=MODEL, use_gpu=False):
-        global _GPU_UNAVAILABLE
+    def __init__(self, model=MODEL, use_gpu=False, gpu_adapter=""):
         self._owner = threading.get_ident()
         self._handle = None
         self._selected_import = None
         self._rejected_import = None
         self.backend = 'CPU'
+        self.gpu_name = ""
         if not supported():
             raise NativeError("Phonon requires 64-bit NVDA and an AVX2-capable processor.")
         try:
             self._dll = _library()
             if use_gpu:
                 with _GPU_INIT_LOCK:
-                    if not _GPU_UNAVAILABLE:
+                    if gpu_adapter not in _GPU_UNAVAILABLE:
                         try:
                             _vulkan_loader()
-                            self._open(model, UNIT_VULKAN)
+                            self._open(model, UNIT_VULKAN, gpu_adapter)
                             self._prime_gpu()
                             self.backend = 'GPU (Vulkan)'
                         except (OSError, NativeError) as error:
                             self.close()
-                            _GPU_UNAVAILABLE = True
-                            log.info('Phonon GPU unavailable; using CPU for this session: %s', error)
+                            _GPU_UNAVAILABLE.add(gpu_adapter)
+                            log.info('Phonon GPU unavailable (%s); using CPU: %s',
+                                     self.gpu_name or ('selected adapter' if gpu_adapter else 'automatic'), error)
+                            self.gpu_name = ""
             if not self._handle:
                 self._open(model, UNIT_CPU)
         except BaseException:
@@ -127,10 +153,16 @@ class Engine:
         detail = self._dll.ptts_last_error(self._handle)
         return detail.decode('utf-8', errors='replace')[:512] if detail else 'Unknown native engine error'
 
-    def _open(self, model, unit):
-        self._handle = self._dll.ptts_new(str(model).encode('utf-8'), unit, b'en')
+    def _open(self, model, unit, adapter=""):
+        path = str(model).encode("utf-8")
+        if unit == UNIT_VULKAN:
+            self._handle = self._dll.ptts_new_vulkan(path, b"en", bytes.fromhex(adapter) if adapter else None)
+        else:
+            self._handle = self._dll.ptts_new(path, unit, b"en")
         if not self._handle:
             raise NativeError('Phonon could not load its bundled model: ' + self._error())
+        if unit == UNIT_VULKAN:
+            self.gpu_name = (self._dll.ptts_vulkan_name(self._handle) or b"").decode("utf-8", errors="replace")
 
     def _prime_gpu(self):
         # Validate real synthesis on the worker before choosing a GPU for speech.
@@ -169,6 +201,11 @@ class Engine:
         self._selected_import = None
         if not self._dll.ptts_set_voice(self._handle, voice.encode("utf-8")):
             raise NativeError("Phonon could not select the requested voice.")
+
+    def set_temperature(self, temperature):
+        self._check_owner()
+        if not self._handle or not self._dll.ptts_set_temperature(self._handle, temperature):
+            raise NativeError("Phonon could not set voice variation.")
 
     def speak(self, text, voice, locale, cancel, sink, *, draft=None):
         self._check_owner()

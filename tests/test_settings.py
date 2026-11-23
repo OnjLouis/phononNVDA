@@ -20,6 +20,7 @@ class Control:
         parent.children.append(self)
 
     def SetName(self, name): self.name = name
+    def SetItems(self, items): self.choices = list(items)
     def SetValue(self, value): self.value = value
     def GetValue(self): return self.value
     def SetSelection(self, value): self.selection = value
@@ -52,7 +53,7 @@ class SettingsTests(unittest.TestCase):
         self.gui.settingsDialogs = types.ModuleType("gui.settingsDialogs")
         self.gui.settingsDialogs.SettingsPanel = Panel
         wx = types.SimpleNamespace(Choice=Control, Button=Control, CheckBox=Control, TextCtrl=Control,
-            TE_READONLY=1, TE_MULTILINE=2, EVT_BUTTON="button", EVT_TIMER="timer", EVT_WINDOW_DESTROY="destroy",
+            TE_READONLY=1, TE_MULTILINE=2, EVT_BUTTON="button", EVT_CHECKBOX="checkbox", EVT_TIMER="timer", EVT_WINDOW_DESTROY="destroy",
             Timer=lambda owner: Mock(), OK=4, ICON_ERROR=8)
         dependencies = {
             "addonHandler": self.addon,
@@ -79,10 +80,24 @@ class SettingsTests(unittest.TestCase):
         self.panel = self.module.PhononSettingsPanel()
         self.panel.makeSettings(object())
 
+    def test_missing_adapter_preference_is_preserved_and_switches_by_id(self):
+        unavailable, present = "ab" * 16, "cd" * 16
+        self.module._settings.save_gpu_adapter(unavailable)
+        panel = self.module.PhononSettingsPanel()
+        panel.makeSettings(object())
+        panel.applyGraphicsAdapters([(present, "Discrete test GPU")])
+        self.assertEqual(panel.adapter.choices, ["Automatic", "Discrete test GPU", "Previously selected GPU (unavailable)"])
+        self.assertEqual(panel.adapter.GetSelection(), 2)
+        panel.onSave()
+        self.assertEqual(self.module._settings.gpu_adapter(), unavailable)
+        panel.adapter.SetSelection(1)
+        panel.onSave()
+        self.assertEqual(self.module._settings.gpu_adapter(), present)
+
     def test_gpu_updates_and_help_have_unique_mnemonics(self):
         labels = [control.label for control in self.panel.children]
-        self.assertEqual(labels, ["Use &GPU acceleration when available", "&Status:", "&Manage imported voices...", "Check for &updates:", "&Check for updates now", "&Help"])
-        self.assertEqual([label.split("&", 1)[1][0].lower() for label in labels], ["g", "s", "m", "u", "c", "h"])
+        self.assertEqual(labels, ["Use &GPU acceleration when available", "Graphics &adapter:", "&Status:", "&Manage imported voices...", "Check for &updates:", "&Check for updates now", "&Help"])
+        self.assertEqual([label.split("&", 1)[1][0].lower() for label in labels], ["g", "a", "s", "m", "u", "c", "h"])
         self.assertFalse(self.panel.gpu.GetValue())
         self.assertEqual(self.panel.interval.name, "Check for updates")
         self.assertEqual(self.panel.interval.choices, ["Never", "Hourly", "Daily"])
@@ -101,7 +116,7 @@ class SettingsTests(unittest.TestCase):
 
     def test_backend_is_read_only_and_tabbable_after_gpu(self):
         self.assertEqual(self.panel.backend.style, self.module.wx.TE_READONLY | self.module.wx.TE_MULTILINE)
-        self.assertEqual(self.panel.children[:3], [self.panel.gpu, self.panel.backend, self.panel.imports])
+        self.assertEqual(self.panel.children[:4], [self.panel.gpu, self.panel.adapter, self.panel.backend, self.panel.imports])
 
     def test_backend_refresh_does_not_rewrite_unchanged_text(self):
         original = self.panel.backend.SetValue

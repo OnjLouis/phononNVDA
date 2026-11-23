@@ -61,17 +61,32 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.language('pt_BR'), 'pt')
         self.assertEqual(runtime.language('unknown'), 'en')
 
+    def test_temperature_uses_the_handle_and_rejects_native_failure(self):
+        with patch.object(self.engine._dll, 'ptts_set_temperature', return_value=True, create=True) as set_value:
+            self.engine.set_temperature(0.7)
+            set_value.assert_called_once_with(self.engine._handle, 0.7)
+            set_value.return_value = False
+            with self.assertRaisesRegex(runtime.NativeError, "variation"):
+                self.engine.set_temperature(-1)
+
 
 class InitializingDLL(DLL):
     def __init__(self, handles=(1,), warm_success=True):
         super().__init__()
         self.handles = iter(handles)
         self.units, self.freed = [], []
+        self.adapter_ids = []
         self.warm_success = warm_success
 
     def ptts_new(self, model, unit, locale):
         self.units.append(unit)
         return next(self.handles)
+
+    def ptts_new_vulkan(self, model, locale, adapter_id):
+        self.adapter_ids.append(adapter_id)
+        return self.ptts_new(model, 3, locale)
+
+    def ptts_vulkan_name(self, handle): return b"Fixture GPU"
 
     def ptts_last_error(self, handle): return b'fixture backend unavailable'
     def ptts_free(self, handle): self.freed.append(handle)
@@ -83,15 +98,15 @@ class InitializingDLL(DLL):
 
 class BackendTests(unittest.TestCase):
     def setUp(self):
-        state = patch.object(runtime, '_GPU_UNAVAILABLE', False, create=True)
+        state = patch.object(runtime, '_GPU_UNAVAILABLE', set())
         state.start()
         self.addCleanup(state.stop)
 
-    def open(self, dll, gpu=False, loader_error=None):
+    def open(self, dll, gpu=False, loader_error=None, adapter=""):
         with patch.object(runtime, 'supported', return_value=True), \
                 patch.object(runtime, '_library', return_value=dll), \
                 patch.object(runtime, '_vulkan_loader', side_effect=loader_error) as loader:
-            engine = runtime.Engine(use_gpu=gpu)
+            engine = runtime.Engine(use_gpu=gpu, gpu_adapter=adapter)
         self.addCleanup(engine.close)
         return engine, loader
 
@@ -145,6 +160,14 @@ class BackendTests(unittest.TestCase):
         loader.assert_not_called()
         info.assert_called_once()
         warning.assert_not_called()
+
+    def test_explicit_gpu_failure_does_not_poison_other_adapters(self):
+        dll = InitializingDLL(handles=(0, 1, 2))
+        first, _ = self.open(dll, gpu=True, adapter="ab" * 16)
+        second, _ = self.open(dll, gpu=True, adapter="cd" * 16)
+        self.assertEqual(dll.adapter_ids, [b"\xab" * 16, b"\xcd" * 16])
+        self.assertEqual((first.backend, second.backend), ("CPU", "GPU (Vulkan)"))
+        self.assertEqual(second.gpu_name, "Fixture GPU")
 
 
 if __name__ == '__main__': unittest.main()

@@ -1,0 +1,85 @@
+diff --git a/ptts-ffi/include/ptts.h b/ptts-ffi/include/ptts.h
+index ff55b63..af53114 100644
+--- a/ptts-ffi/include/ptts.h
++++ b/ptts-ffi/include/ptts.h
+@@ -45,6 +45,10 @@ const char *ptts_voices(const PttsHandle *h);
+ bool ptts_set_voice(PttsHandle *h, const char *name);
+ /// Normalize text as `lang` (en, fr, de, es, pt or none) from the next ptts_speak on, with no reload.
+ bool ptts_set_language(PttsHandle *h, const char *lang);
++#ifndef __APPLE__
++/// Set the sampling temperature for subsequent requests. Negative and non-finite values fail.
++bool ptts_set_temperature(PttsHandle *h, float temperature);
++#endif
+ /// The languages the model was trained for, NUL-separated like ptts_voices. Borrowed.
+ const char *ptts_languages(const PttsHandle *h);
+ /// The last error on `h`, or the last ptts_new failure on this thread when `h` is NULL.
+diff --git a/ptts-ffi/src/cpu.rs b/ptts-ffi/src/cpu.rs
+index c6b1877..651e5f5 100644
+--- a/ptts-ffi/src/cpu.rs
++++ b/ptts-ffi/src/cpu.rs
+@@ -58,6 +58,7 @@ pub struct Engine {
+     normalize: Normalize,
+     /// Samples per frame, to count frames in what the stream hands back.
+     frame_size: usize,
++    temperature: Option<f32>,
+     #[cfg(feature = "vulkan-adapters")]
+     pub(crate) gpu_name: Option<std::ffi::CString>,
+ }
+@@ -118,6 +119,7 @@ impl Engine {
+             normalize,
+             synth,
+             frame_size,
++            temperature: None,
+             #[cfg(feature = "vulkan-adapters")]
+             gpu_name,
+         })
+@@ -158,13 +160,21 @@ impl Engine {
+         Ok(())
+     }
+ 
++    pub fn set_temperature(&mut self, temperature: f32) {
++        self.temperature = Some(temperature);
++    }
++
+     pub fn speak(
+         &mut self,
+         text: &str,
+         sink: &mut dyn FnMut(&[f32]) -> bool,
+     ) -> Result<PttsResult, String> {
+         let start = std::time::Instant::now();
+-        let opts = SpeechOptions { voice: self.voice.clone(), ..Default::default() };
++        let opts = SpeechOptions {
++            voice: self.voice.clone(),
++            temperature: self.temperature,
++            ..Default::default()
++        };
+         let text = self.normalize.apply(text);
+         let stream = self.synth.stream_with(&text, &opts).map_err(|e| e.to_string())?;
+         let (mut samples, mut ttfa) = (0, None);
+diff --git a/ptts-ffi/src/lib.rs b/ptts-ffi/src/lib.rs
+index 8893ebe..fcb2387 100644
+--- a/ptts-ffi/src/lib.rs
++++ b/ptts-ffi/src/lib.rs
+@@ -270,6 +270,22 @@ pub unsafe extern "C" fn ptts_set_language(h: *mut PttsHandle, lang: *const c_ch
+     }
+ }
+ 
++/// Set the sampling temperature for subsequent requests. Negative and non-finite values fail.
++///
++/// # Safety
++/// `h` must be null or come from `ptts_new` or `ptts_new_vulkan`.
++#[cfg(not(target_vendor = "apple"))]
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn ptts_set_temperature(h: *mut PttsHandle, temperature: f32) -> bool {
++    let Some(h) = (unsafe { h.as_mut() }) else { return false };
++    if !temperature.is_finite() || temperature < 0.0 {
++        h.last_error = Some(c_string("Sampling temperature must be finite and nonnegative."));
++        return false;
++    }
++    h.engine.set_temperature(temperature);
++    true
++}
++
+ /// The last error on `h`, or, when `h` is null, the last `ptts_new` failure on this thread.
+ /// Borrowed until the next failing call.
+ ///

@@ -4,6 +4,12 @@
 for English, French, German, Spanish and Portuguese. The model and voices are
 included, with no first-use download required.</p>
 <h2>Changelog</h2>
+<h3>1.0.9</h3>
+<ul>
+<li>Choose a graphics adapter in Phonon settings. Status identifies the adapter in use.</li>
+<li>Improved GPU initialization on drivers that offer more than one compatible memory type.</li>
+<li>Use Voice variation in Speech settings or the synth ring to try less or more expression while leaving the default unchanged.</li>
+</ul>
 <h3>1.0.8</h3>
 <ul>
 <li>Preview a voice before importing it and change an imported voice's language without replacing it.</li>
@@ -72,6 +78,11 @@ settings. <strong>Default</strong> leaves Phonon's audio unchanged.
 <strong>Shorter</strong> trims sustained quiet gaps, and <strong>Longer</strong> adds
 time to sustained gaps between spoken sounds. These options do not change
 punctuation or explicit pauses requested by NVDA.</p>
+<p><strong>Voice variation</strong> is experimental and is available in Speech
+settings and the synth settings ring. <strong>Default</strong> keeps Phonon's
+usual sound. <strong>Less</strong> and <strong>More</strong> change how much the
+delivery varies. The difference may be subtle and depends on the voice and
+text. This setting does not select an emotion or change the voice.</p>
 <p>Rate, Rate boost, Pitch and Volume use NVDA's streaming Sonic processing.
 Audio plays through NVDA's selected output device. Shift pauses or resumes;
 Control stops speech. The engine finishes its current calculation before
@@ -79,7 +90,7 @@ starting replacement speech, so responsiveness depends on the processor.</p>
 <p>If the native engine fails, the active driver switches to eSpeak NG to preserve
 access. Keep a familiar alternative synthesizer available.</p>
 <h2>Settings and Updates</h2>
-<p>The Phonon settings panel contains GPU acceleration, Status, Manage imported voices,
+<p>The Phonon settings panel contains GPU acceleration, Graphics adapter, Status, Manage imported voices,
 Check for updates, Check for updates now and Help. Update intervals are Never, Hourly or Daily; Daily is the
 default. Help opens this manual.</p>
 <p><strong>Use GPU acceleration when available</strong> is checked by default. Phonon uses a
@@ -87,12 +98,17 @@ compatible NVIDIA, AMD or Intel graphics device through its installed Vulkan
 driver. No CUDA toolkit is required. Performance depends on the device; disable
 it if CPU speech works better. After changing this option, switch to another
 synthesizer and back to Phonon, or restart NVDA.</p>
+<p><strong>Graphics adapter</strong> lists compatible GPUs reported by Vulkan.
+<strong>Automatic</strong> normally prefers a discrete GPU. To use a specific
+adapter, choose it by name, save the settings, then select Phonon again.
+If the selected adapter is unavailable, Phonon uses the CPU. Choose
+Automatic or another listed adapter to try GPU acceleration again.</p>
 <p>Phonon tests GPU synthesis before using it. If initialization fails, it quietly
 uses the CPU, without a popup or spoken warning. The reason is recorded once in
-the NVDA log, and GPU initialization is not retried until NVDA restarts. No
+the NVDA log. A different adapter can still be tried in the same session. No
 graphics driver is downloaded or installed. CPU speech remains available without a GPU.</p>
 <p><strong>Status</strong> lists built-in and imported voice counts and reports the running engine, rather than just whether a
-GPU is present. It distinguishes GPU (Vulkan), CPU with GPU disabled, and CPU
+GPU is present. It identifies the active Vulkan adapter by name and distinguishes CPU with GPU disabled from CPU
 fallback after unsuccessful GPU initialization. If Phonon is not selected, no
 backend is assumed. The field updates only while this settings panel is open.</p>
 <p>Updates require a valid Phonon signature and matching package identity, version,

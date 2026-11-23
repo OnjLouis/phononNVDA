@@ -1,0 +1,519 @@
+diff --git a/ptts-ffi/Cargo.toml b/ptts-ffi/Cargo.toml
+index db8bb8b..1d836df 100644
+--- a/ptts-ffi/Cargo.toml
++++ b/ptts-ffi/Cargo.toml
+@@ -11,6 +11,9 @@ license.workspace = true
+ # A static library for the iOS xcframework, a shared one for Android.
+ crate-type = ["staticlib", "cdylib", "rlib"]
+ 
++[features]
++vulkan-adapters = ["ptts/vulkan"]
++
+ [dependencies]
+ # Text preparation, normalization and the tokenizer come from ptts, so both engines speak the
+ # same prompt the other frontends do.
+diff --git a/ptts-ffi/include/ptts.h b/ptts-ffi/include/ptts.h
+index c295ebb..ff55b63 100644
+--- a/ptts-ffi/include/ptts.h
++++ b/ptts-ffi/include/ptts.h
+@@ -33,6 +33,12 @@ typedef bool (*PttsFrameFn)(const float *pcm, size_t n, void *user);
+ /// to load; a checkpoint folder without voices loads, lists none, and speaks in no particular
+ /// voice.
+ PttsHandle *ptts_new(const char *dir, uint32_t unit, const char *lang);
++/// Optional desktop Vulkan adapter API (when built with vulkan-adapters).
++/// The ID is 16 bytes. Pointers passed to the visitor are borrowed only for the call.
++typedef void (*PttsVulkanAdapterFn)(const uint8_t *id, const char *name, void *user);
++bool ptts_vulkan_adapters(PttsVulkanAdapterFn visit, void *user);
++PttsHandle *ptts_new_vulkan(const char *dir, const char *lang, const uint8_t *id);
++const char *ptts_vulkan_name(const PttsHandle *h);
+ bool ptts_speak(PttsHandle *h, const char *text, PttsFrameFn cb, void *user, PttsResult *out);
+ /// NUL-separated voice names, ending in a second NUL. Borrowed.
+ const char *ptts_voices(const PttsHandle *h);
+diff --git a/ptts-ffi/src/cpu.rs b/ptts-ffi/src/cpu.rs
+index 5e457d9..c6b1877 100644
+--- a/ptts-ffi/src/cpu.rs
++++ b/ptts-ffi/src/cpu.rs
+@@ -58,10 +58,18 @@ pub struct Engine {
+     normalize: Normalize,
+     /// Samples per frame, to count frames in what the stream hands back.
+     frame_size: usize,
++    #[cfg(feature = "vulkan-adapters")]
++    pub(crate) gpu_name: Option<std::ffi::CString>,
+ }
+ 
+ impl Engine {
+     pub fn open(dir: &Path, unit: u32, lang: &str) -> Result<Self, String> {
++        Self::open_selected(dir, unit, lang, None)
++    }
++
++    pub(crate) fn open_selected(
++        dir: &Path, unit: u32, lang: &str, adapter_id: Option<[u8; 16]>,
++    ) -> Result<Self, String> {
+         let device = device(unit)?;
+         prepare_cpu_pool();
+         let normalize = lang.parse::<Normalize>().map_err(|e| e.to_string())?;
+@@ -80,10 +88,28 @@ impl Engine {
+             .tokenizer_file(dir.join("tokenizer.json"))
+             .device(device)
+             .quant(quant);
++        #[cfg(not(feature = "vulkan-adapters"))]
++        let _ = adapter_id;
++        #[cfg(feature = "vulkan-adapters")]
++        let gpu_name = if unit == PTTS_UNIT_VULKAN {
++            let gpu = xn::vulkan_backend::Device::new_selected(0, adapter_id)
++                .map_err(|e| e.to_string())?;
++            let name = crate::c_string(gpu.name());
++            builder = builder.vulkan_device(gpu);
++            Some(name)
++        } else {
++            None
++        };
+         for (name, path) in ptts::loader::checkpoint_voices(dir) {
+             builder = builder.add_voice(name, path);
+         }
+-        let synth = builder.build().map_err(|e| e.to_string())?;
++        let synth = builder.build().map_err(|e| {
++            #[cfg(feature = "vulkan-adapters")]
++            if let Some(name) = &gpu_name {
++                return format!("{}: {e}", name.to_string_lossy());
++            }
++            e.to_string()
++        })?;
+         let frame_size = (synth.sample_rate() as f64 / frame_rate).round() as usize;
+         Ok(Self {
+             voices: synth.voices(),
+@@ -92,6 +118,8 @@ impl Engine {
+             normalize,
+             synth,
+             frame_size,
++            #[cfg(feature = "vulkan-adapters")]
++            gpu_name,
+         })
+     }
+ 
+diff --git a/ptts-ffi/src/lib.rs b/ptts-ffi/src/lib.rs
+index 79c6a0c..8893ebe 100644
+--- a/ptts-ffi/src/lib.rs
++++ b/ptts-ffi/src/lib.rs
+@@ -94,9 +94,13 @@ fn nul_separated(names: &[String]) -> Vec<u8> {
+ 
+ fn open(dir: &Path, unit: u32, lang: &str) -> Result<PttsHandle, String> {
+     let engine = Engine::open(dir, unit, lang)?;
++    Ok(handle(engine))
++}
++
++fn handle(engine: Engine) -> PttsHandle {
+     let voice_blob = nul_separated(engine.voices());
+     let language_blob = nul_separated(engine.languages());
+-    Ok(PttsHandle { engine, voice_blob, language_blob, last_error: None })
++    PttsHandle { engine, voice_blob, language_blob, last_error: None }
+ }
+ 
+ /// Load the model in `dir` for `unit` (`PTTS_UNIT_ANE` or `PTTS_UNIT_CPU`), normalizing text as
+@@ -125,6 +129,57 @@ pub unsafe extern "C" fn ptts_new(
+     }
+ }
+ 
++#[cfg(all(not(target_vendor = "apple"), feature = "vulkan-adapters"))]
++#[unsafe(no_mangle)]
++pub extern "C" fn ptts_vulkan_adapters(
++    visit: extern "C" fn(*const u8, *const c_char, *mut c_void), user: *mut c_void,
++) -> bool {
++    match guarded(|| xn::vulkan_backend::Device::adapters().map_err(|e| e.to_string())) {
++        Ok(adapters) => {
++            for (id, name) in adapters {
++                visit(id.as_ptr(), c_string(&name).as_ptr(), user);
++            }
++            true
++        }
++        Err(error) => {
++            LAST_ERROR.with(|slot| *slot.borrow_mut() = Some(c_string(&error)));
++            false
++        }
++    }
++}
++
++/// Load on the automatic GPU or the adapter identified by a 16-byte UUID.
++///
++/// # Safety
++/// `dir` and `lang` must be NUL-terminated UTF-8; `id` is null or readable for 16 bytes.
++#[cfg(all(not(target_vendor = "apple"), feature = "vulkan-adapters"))]
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn ptts_new_vulkan(
++    dir: *const c_char, lang: *const c_char, id: *const [u8; 16],
++) -> *mut PttsHandle {
++    let dir = unsafe { CStr::from_ptr(dir) }.to_string_lossy();
++    let lang = unsafe { CStr::from_ptr(lang) }.to_string_lossy();
++    let id = unsafe { id.as_ref() }.copied();
++    match guarded(|| Engine::open_selected(Path::new(dir.as_ref()), PTTS_UNIT_VULKAN, &lang, id)) {
++        Ok(engine) => Box::into_raw(Box::new(handle(engine))),
++        Err(error) => {
++            LAST_ERROR.with(|slot| *slot.borrow_mut() = Some(c_string(&error)));
++            std::ptr::null_mut()
++        }
++    }
++}
++
++/// Return the selected Vulkan adapter name, borrowed for the lifetime of `h`.
++///
++/// # Safety
++/// `h` must be null or come from `ptts_new` or `ptts_new_vulkan`.
++#[cfg(all(not(target_vendor = "apple"), feature = "vulkan-adapters"))]
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn ptts_vulkan_name(h: *const PttsHandle) -> *const c_char {
++    unsafe { h.as_ref() }.and_then(|h| h.engine.gpu_name.as_ref())
++        .map_or(std::ptr::null(), |name| name.as_ptr())
++}
++
+ /// Speak `text`, calling `cb(pcm, n, user)` with each frame's audio as soon as it is decoded.
+ /// `out` then describes the whole utterance. Returns false on failure; see `ptts_last_error`.
+ ///
+diff --git a/ptts/src/synth.rs b/ptts/src/synth.rs
+index 09650d1..cf1474e 100644
+--- a/ptts/src/synth.rs
++++ b/ptts/src/synth.rs
+@@ -1399,6 +1399,8 @@ pub struct SynthBuilder {
+     weights: PathBuf,
+     tokenizer_file: Option<PathBuf>,
+     device: DeviceKind,
++    #[cfg(feature = "vulkan")]
++    vulkan_device: Option<xn::vulkan_backend::Device>,
+     quant: Quant,
+     tokenizer: Option<Box<dyn crate::Tokenizer + Send + Sync>>,
+     temperature: f32,
+@@ -1452,6 +1454,8 @@ impl SynthBuilder {
+             normalize: normalize.into(),
+             tokenizer_file: None,
+             device: DeviceKind::Auto,
++            #[cfg(feature = "vulkan")]
++            vulkan_device: None,
+             quant: Quant::F32,
+             tokenizer: None,
+             temperature: 0.3,
+@@ -1478,6 +1482,14 @@ impl SynthBuilder {
+         self
+     }
+ 
++    /// Use a specific Vulkan device instead of automatically choosing one.
++    #[cfg(feature = "vulkan")]
++    pub fn vulkan_device(mut self, device: xn::vulkan_backend::Device) -> Self {
++        self.device = DeviceKind::Vulkan;
++        self.vulkan_device = Some(device);
++        self
++    }
++
+     /// Weight format for the flow-LM transformer linears. CPU only.
+     pub fn quant(mut self, quant: Quant) -> Self {
+         self.quant = quant;
+@@ -1607,7 +1619,10 @@ impl SynthBuilder {
+     fn build_vulkan(self) -> Result<Synth> {
+         // `quant()` reports `self.quant`, which `check_device` keeps at F32 here.
+         debug_assert_eq!(self.quant, Quant::F32);
+-        let dev = xn::vulkan_backend::Device::new(0)?;
++        let dev = match self.vulkan_device.clone() {
++            Some(device) => device,
++            None => xn::vulkan_backend::Device::new(0)?,
++        };
+         let synth = self.load::<xn::Unquantized<f32, _>>(dev, false)?;
+         Ok(Synth(Box::new(synth)))
+     }
+diff --git a/xn/src/vulkan_backend/mod.rs b/xn/src/vulkan_backend/mod.rs
+index 2056037..663530d 100644
+--- a/xn/src/vulkan_backend/mod.rs
++++ b/xn/src/vulkan_backend/mod.rs
+@@ -279,8 +279,7 @@ fn device_type_score(t: vk::PhysicalDeviceType) -> u32 {
+     }
+ }
+ 
+-impl Device {
+-    pub fn new(ordinal: usize) -> Result<Self> {
++fn create_instance() -> Result<(ash::Entry, ash::Instance)> {
+         #[cfg(test)]
+         let entry = native_safety_tests::load_entry();
+         #[cfg(not(test))]
+@@ -294,6 +293,57 @@ impl Device {
+         let create_info = vk::InstanceCreateInfo::default().application_info(&app_info);
+         let instance = unsafe { entry.create_instance(&create_info, None) }
+             .map_err(vkerr("create_instance"))?;
++        Ok((entry, instance))
++}
++
++fn adapter_uuid(instance: &ash::Instance, device: vk::PhysicalDevice) -> [u8; vk::UUID_SIZE] {
++    let mut id = vk::PhysicalDeviceIDProperties::default();
++    let mut props = vk::PhysicalDeviceProperties2::default().push_next(&mut id);
++    unsafe { instance.get_physical_device_properties2(device, &mut props) };
++    id.device_uuid
++}
++
++fn adapter_name(props: &vk::PhysicalDeviceProperties) -> String {
++    unsafe { CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy().into_owned()
++}
++
++impl Device {
++    pub fn adapters() -> Result<Vec<([u8; vk::UUID_SIZE], String)>> {
++        let (_entry, instance) = create_instance()?;
++        let _rollback = DeviceRollback::new(&instance);
++        let pdevices =
++            unsafe { instance.enumerate_physical_devices() }.map_err(vkerr("enumerate_devices"))?;
++        let mut available = Vec::new();
++        for pd in pdevices {
++            let props = unsafe { instance.get_physical_device_properties(pd) };
++            if props.api_version < vk::API_VERSION_1_1 || props.device_type == vk::PhysicalDeviceType::CPU {
++                continue;
++            }
++            let queues = unsafe { instance.get_physical_device_queue_family_properties(pd) };
++            if !queues.iter().any(|family| family.queue_count > 0 && family.queue_flags.contains(vk::QueueFlags::COMPUTE)) {
++                continue;
++            }
++            let uuid = adapter_uuid(&instance, pd);
++            if uuid != [0; vk::UUID_SIZE] {
++                available.push((device_type_score(props.device_type), uuid, adapter_name(&props)));
++            }
++        }
++        available.sort_by(|a, b| b.0.cmp(&a.0));
++        // Non-unique UUIDs cannot safely address a specific adapter.
++        Ok(available.iter().filter(|(_, id, _)| available.iter().filter(|(_, other, _)| other == id).count() == 1)
++            .map(|(_, id, name)| (*id, name.clone())).collect())
++    }
++
++    pub fn name(&self) -> &str {
++        &self.device_name
++    }
++
++    pub fn new(ordinal: usize) -> Result<Self> {
++        Self::new_selected(ordinal, None)
++    }
++
++    pub fn new_selected(ordinal: usize, id: Option<[u8; vk::UUID_SIZE]>) -> Result<Self> {
++        let (entry, instance) = create_instance()?;
+         let mut rollback = DeviceRollback::new(&instance);
+ 
+         let pdevices =
+@@ -315,7 +365,19 @@ impl Device {
+             .collect();
+         ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+ 
+-        let pdevice = if let Ok(idx) =
++        let pdevice = if let Some(id) = id {
++            let mut matching = pdevices.iter().copied().filter(|&pd| {
++                let props = unsafe { instance.get_physical_device_properties(pd) };
++                props.api_version >= vk::API_VERSION_1_1 && adapter_uuid(&instance, pd) == id
++            });
++            let Some(selected) = matching.next() else {
++                crate::bail!("vulkan: the selected graphics adapter is unavailable");
++            };
++            if id == [0; vk::UUID_SIZE] || matching.next().is_some() {
++                crate::bail!("vulkan: the selected graphics adapter is ambiguous");
++            }
++            selected
++        } else if let Ok(idx) =
+             std::env::var("XN_VULKAN_DEVICE").unwrap_or_default().parse::<usize>()
+         {
+             pdevices.get(idx).copied().unwrap_or(ranked[0].2)
+@@ -324,8 +386,7 @@ impl Device {
+         };
+ 
+         let props = unsafe { instance.get_physical_device_properties(pdevice) };
+-        let device_name =
+-            unsafe { CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy().into_owned();
++        let device_name = adapter_name(&props);
+ 
+         // Pick a queue family that supports compute.
+         let qfams = unsafe { instance.get_physical_device_queue_family_properties(pdevice) };
+@@ -559,26 +620,27 @@ impl Device {
+         };
+         let req = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+ 
+-        // Prefer the unified APU type (device-local + host-visible + coherent),
+-        // fall back to any host-visible coherent type.
+-        let unified = vk::MemoryPropertyFlags::DEVICE_LOCAL
+-            | vk::MemoryPropertyFlags::HOST_VISIBLE
+-            | vk::MemoryPropertyFlags::HOST_COHERENT;
+         let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+-        let mem_type = self
+-            .find_memory_type(req.memory_type_bits, unified)
+-            .or_else(|| self.find_memory_type(req.memory_type_bits, host));
+-        let mem_type = match mem_type {
+-            Some(m) => m,
+-            None => {
+-                crate::bail!("vulkan: no host-visible coherent memory type available");
++        let local = host | vk::MemoryPropertyFlags::DEVICE_LOCAL;
++        let mut types = req.memory_type_bits;
++        let mut attempts = 0;
++        // A discrete GPU's CPU-visible local heap can be much smaller than its total VRAM.
++        let memory = loop {
++            let Some(index) = self.find_memory_type(types, local)
++                .or_else(|| self.find_memory_type(types, host)) else {
++                if attempts == 0 {
++                    crate::bail!("vulkan: no host-visible coherent memory type available");
++                }
++                crate::bail!("vulkan: allocate_memory: ERROR_OUT_OF_DEVICE_MEMORY after {attempts} compatible memory types");
++            };
++            attempts += 1;
++            let alloc = vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(index);
++            match unsafe { self.device.allocate_memory(&alloc, None) } {
++                Ok(memory) => break memory,
++                Err(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY) => types &= !(1 << index),
++                Err(error) => return Err(vkerr("allocate_memory")(error)),
+             }
+         };
+-
+-        let alloc =
+-            vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(mem_type);
+-        let memory = unsafe { self.device.allocate_memory(&alloc, None) }
+-            .map_err(vkerr("allocate_memory"))?;
+         rollback.memory = memory;
+         unsafe { self.device.bind_buffer_memory(buffer, memory, 0) }
+             .map_err(vkerr("bind_buffer_memory"))?;
+diff --git a/xn/src/vulkan_backend/native_safety_tests.rs b/xn/src/vulkan_backend/native_safety_tests.rs
+index dd2227f..e48d860 100644
+--- a/xn/src/vulkan_backend/native_safety_tests.rs
++++ b/xn/src/vulkan_backend/native_safety_tests.rs
+@@ -13,8 +13,11 @@ struct Driver {
+     created: Vec<(&'static str, u64)>,
+     destroyed: Vec<(&'static str, u64)>,
+     no_devices: bool,
++    hybrid: bool,
+     no_compute: bool,
+     no_memory: bool,
++    local_heap_full: bool,
++    attempted_types: Vec<u32>,
+     partial_pipeline: bool,
+ }
+ 
+@@ -264,7 +267,24 @@ create_device_resource!(create_command_pool, CommandPoolCreateInfo, CommandPool,
+ create_device_resource!(create_fence, FenceCreateInfo, Fence, "fence");
+ create_device_resource!(create_descriptor_pool, DescriptorPoolCreateInfo, DescriptorPool, "descriptor");
+ create_device_resource!(create_buffer, BufferCreateInfo, Buffer, "buffer");
+-create_device_resource!(allocate_memory, MemoryAllocateInfo, DeviceMemory, "memory");
++unsafe extern "system" fn allocate_memory(
++    _: vk::Device, info: *const vk::MemoryAllocateInfo<'_>,
++    _: *const vk::AllocationCallbacks<'_>, out: *mut vk::DeviceMemory,
++) -> vk::Result {
++    let memory_type = unsafe { (*info).memory_type_index };
++    if DRIVER.with(|state| {
++        let mut state = state.borrow_mut();
++        state.attempted_types.push(memory_type);
++        state.local_heap_full && memory_type == 0
++    }) {
++        return vk::Result::ERROR_OUT_OF_DEVICE_MEMORY;
++    }
++    let result = checkpoint();
++    if result == vk::Result::SUCCESS {
++        unsafe { *out = vk::DeviceMemory::from_raw(created("memory")); }
++    }
++    result
++}
+ create_device_resource!(create_shader_module, ShaderModuleCreateInfo, ShaderModule, "shader");
+ destroy_device_resource!(destroy_query_pool, QueryPool, "query");
+ destroy_device_resource!(destroy_set_layout, DescriptorSetLayout, "set");
+@@ -300,23 +320,45 @@ unsafe extern "system" fn enumerate_devices(
+     let result = checkpoint();
+     if result == vk::Result::SUCCESS {
+         unsafe {
+-            *count = if DRIVER.with(|d| d.borrow().no_devices) { 0 } else { 1 };
+-            if !out.is_null() && *count != 0 { *out = vk::PhysicalDevice::from_raw(1); }
++            *count = DRIVER.with(|d| {
++                let d = d.borrow();
++                if d.no_devices { 0 } else if d.hybrid { 2 } else { 1 }
++            });
++            if !out.is_null() {
++                for i in 0..*count {
++                    *out.add(i as usize) = vk::PhysicalDevice::from_raw(u64::from(i + 1));
++                }
++            }
+         }
+     }
+     result
+ }
+ 
+ unsafe extern "system" fn get_properties(
+-    _: vk::PhysicalDevice, out: *mut vk::PhysicalDeviceProperties,
++    device: vk::PhysicalDevice, out: *mut vk::PhysicalDeviceProperties,
+ ) {
+     unsafe {
+         *out = vk::PhysicalDeviceProperties::default();
+-        (*out).device_type = vk::PhysicalDeviceType::DISCRETE_GPU;
++        let integrated = DRIVER.with(|d| d.borrow().hybrid) && device.as_raw() == 1;
++        (*out).device_type = if integrated { vk::PhysicalDeviceType::INTEGRATED_GPU } else { vk::PhysicalDeviceType::DISCRETE_GPU };
++        (*out).api_version = vk::API_VERSION_1_1;
++        let name = if integrated { "Integrated test GPU" } else { "Discrete test GPU" };
++        for (slot, byte) in (*out).device_name.iter_mut().zip(name.bytes()) {
++            *slot = byte as c_char;
++        }
+         (*out).limits.timestamp_period = 1.0;
+     }
+ }
+ 
++unsafe extern "system" fn get_properties2(
++    device: vk::PhysicalDevice, out: *mut vk::PhysicalDeviceProperties2<'_>,
++) {
++    let id = unsafe { (*out).p_next.cast::<vk::PhysicalDeviceIDProperties<'_>>() };
++    if !id.is_null() {
++        unsafe { (*id).device_uuid = [device.as_raw() as u8; vk::UUID_SIZE]; }
++    }
++}
++
+ unsafe extern "system" fn get_queue_properties(
+     _: vk::PhysicalDevice, count: *mut u32, out: *mut vk::QueueFamilyProperties,
+ ) {
+@@ -366,9 +408,12 @@ unsafe extern "system" fn get_memory_properties(
+ ) {
+     unsafe {
+         *out = vk::PhysicalDeviceMemoryProperties::default();
+-        (*out).memory_type_count = 1;
++        (*out).memory_type_count = if DRIVER.with(|d| d.borrow().local_heap_full) { 2 } else { 1 };
+         (*out).memory_types[0].property_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL
+             | vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
++        (*out).memory_types[1].heap_index = 1;
++        (*out).memory_types[1].property_flags =
++            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+     }
+ }
+ 
+@@ -390,10 +435,36 @@ unsafe extern "system" fn get_buffer_requirements(
+ ) {
+     unsafe {
+         *out = vk::MemoryRequirements { size: 256, alignment: 1,
+-            memory_type_bits: if DRIVER.with(|d| d.borrow().no_memory) { 0 } else { 1 } };
++            memory_type_bits: DRIVER.with(|d| {
++                let d = d.borrow();
++                if d.no_memory { 0 } else if d.local_heap_full { 3 } else { 1 }
++            }) };
+     }
+ }
+ 
++#[test]
++fn full_device_local_heap_retries_compatible_system_heap() {
++    let _mock = MockScope;
++    reset();
++    DRIVER.with(|d| d.borrow_mut().local_heap_full = true);
++    let device = new_device(false).unwrap();
++    let (buffer, memory, ptr, class) = device.alloc_buffer(256).unwrap();
++    DRIVER.with(|d| assert_eq!(d.borrow().attempted_types, [0, 1]));
++    device.defer_free(PooledBuf { buffer, memory, ptr: ptr as usize, class });
++}
++
++#[test]
++fn hybrid_adapter_selection_uses_identity_not_enumeration_order() {
++    let _mock = MockScope;
++    reset();
++    DRIVER.with(|d| d.borrow_mut().hybrid = true);
++    let adapters = Device::adapters().unwrap();
++    assert_eq!(adapters, [([2; 16], "Discrete test GPU".into()), ([1; 16], "Integrated test GPU".into())]);
++    assert_eq!(Device::new(0).unwrap().name(), "Discrete test GPU");
++    assert_eq!(Device::new_selected(0, Some([1; 16])).unwrap().name(), "Integrated test GPU");
++    assert!(Device::new_selected(0, Some([9; 16])).is_err());
++}
++
+ unsafe extern "system" fn bind_buffer_memory(
+     _: vk::Device, _: vk::Buffer, _: vk::DeviceMemory, _: vk::DeviceSize,
+ ) -> vk::Result { checkpoint() }
+@@ -438,6 +509,7 @@ unsafe extern "system" fn get_instance_proc_addr(_: vk::Instance, name: *const c
+         b"vkDestroyInstance" => destroy_instance as *const (),
+         b"vkEnumeratePhysicalDevices" => enumerate_devices as *const (),
+         b"vkGetPhysicalDeviceProperties" => get_properties as *const (),
++        b"vkGetPhysicalDeviceProperties2" => get_properties2 as *const (),
+         b"vkGetPhysicalDeviceQueueFamilyProperties" => get_queue_properties as *const (),
+         b"vkGetPhysicalDeviceFeatures2" => get_features as *const (),
+         b"vkEnumerateDeviceExtensionProperties" => enumerate_extensions as *const (),
