@@ -6,6 +6,10 @@ included, with no first-use download required.
 
 ## Changelog
 
+### 1.0.10
+
+- Speech can start sooner when NVDA's **Trim leading silence in speech audio** is enabled. Explicit pauses are unchanged.
+
 ### 1.0.9
 
 - Choose a graphics adapter in Phonon settings. Status identifies the adapter in use.

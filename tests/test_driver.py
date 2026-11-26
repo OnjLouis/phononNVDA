@@ -88,6 +88,35 @@ driver_module = importlib.import_module("synthDrivers.phononLocal")
 
 
 class AudioRateTests(unittest.TestCase):
+    def test_only_matching_decoder_click_is_suppressed(self):
+        audio = importlib.import_module("synthDrivers.phononLocal._audio")
+        decoder = (ctypes.c_float * 1920)()
+        for index, value in (
+            (0, -35), (2, -66), (4, -170), (10, -244), (21, -192), (32, 70),
+            (49, 66), (64, 84), (80, 2), (110, -16),
+        ):
+            decoder[index] = value / 32767
+        unknown = (ctypes.c_float * 1920)()
+        click = struct.pack("<h", 100) * 60
+        quiet = bytes(2 * 120)
+        consonant = struct.pack("<h", 90) * 70
+        normal = click + quiet + consonant
+        loud = struct.pack("<h", 900) + normal
+        short = click + quiet[:8]
+        for enabled, raw, packets, expected in (
+            (True, decoder, [normal, normal], [bytes(len(click)) + quiet + consonant, normal]),
+            (True, decoder, [b"", normal], [b"", bytes(len(click)) + quiet + consonant]),
+            (True, decoder, [short, normal], [short, normal]),
+            (True, decoder, [loud, normal], [loud, normal]),
+            (True, unknown, [normal], [normal]),
+            (False, decoder, [normal], [normal]),
+        ):
+            stream = types.SimpleNamespace(writeFloat=lambda *_: None, readShort=iter(packets).__next__)
+            sonic = types.SimpleNamespace(initialize=lambda: None, SonicStream=lambda *_: stream)
+            with patch.dict(sys.modules, {"synthDrivers._sonic": sonic}):
+                processor = audio.Processor(100, 50, 100, False, enabled)
+                self.assertEqual([processor.process(raw, len(raw)) for _ in packets], expected)
+
     def test_normal_rate_has_more_headroom_without_changing_boost(self):
         audio = importlib.import_module("synthDrivers.phononLocal._audio")
         stream = types.SimpleNamespace()
@@ -157,7 +186,8 @@ class FakeEngine:
 
 
 class Processor:
-    def __init__(self, *args): pass
+    trim_args = []
+    def __init__(self, *args): self.trim_args.append(args[4:])
     def process(self, pcm, count): return b"\1\0" * count
     def finish(self): return b""
 
@@ -214,6 +244,7 @@ class DriverTests(unittest.TestCase):
             patched.start(); self.addCleanup(patched.stop)
         FakeEngine.calls, FakeEngine.closed = [], []
         FakeEngine.temperatures = []
+        Processor.trim_args.clear()
         FakeEngine.started.clear()
         notice.items.clear(); done.items.clear()
         self.driver = driver_module.SynthDriver()
@@ -240,6 +271,25 @@ class DriverTests(unittest.TestCase):
             self.assertEqual(self.driver._player.audio[-1], bytes(driver_module.SAMPLE_RATE // 2))
             self.driver._player.drain()
             self.assertEqual(notice.items[-1]["index"], 7)
+
+    def test_startup_cleanup_follows_trim_setting_and_explicit_breaks(self):
+        for trim, sequence, expected in (
+            (True, [commands.IndexCommand(3), "focus", commands.IndexCommand(4), "more"], [(True,), (False,)]),
+            (False, ["no trim"], [(False,)]),
+            (True, [commands.BreakCommand(200), "keep the pause"], [(False,)]),
+        ):
+            with patch.dict(config.conf["speech"], {"trimLeadingSilence": trim}):
+                synth = driver_module.SynthDriver()
+            try:
+                Processor.trim_args.clear()
+                synth.speak(sequence)
+                wait_for(lambda: len(synth._player.callbacks) == 1 + sum(
+                    isinstance(item, commands.IndexCommand) for item in sequence))
+                self.assertEqual(Processor.trim_args, expected)
+                if isinstance(sequence[0], commands.BreakCommand):
+                    self.assertEqual(synth._player.audio[0], bytes(driver_module.SAMPLE_RATE * 2 // 5))
+            finally:
+                synth.terminate()
 
     def test_voice_variation_is_named_and_captured_with_each_request(self):
         self.assertEqual(self.driver.voiceVariation, "default")

@@ -13,6 +13,41 @@ _SHORT_TAIL_FRAMES = 25 // _FRAME_MS
 _LONG_MIN_FRAMES = 120 // _FRAME_MS
 _LONG_EXTRA = bytes(80 // _FRAME_MS * _FRAME_BYTES)
 
+_PCM16_MAX = 32767
+_NVDA_SILENCE_PEAK = _PCM16_MAX // 1024
+_DECODER_START_SCAN_SAMPLES = SAMPLE_RATE * 20 // 1000
+_DECODER_START_QUIET_SAMPLES = SAMPLE_RATE * 5 // 1000
+_DECODER_START_MAX_PEAK = 512
+_DECODER_SIGNATURE_TOLERANCE = 16
+# The bundled decoder emits this waveform before either CPU or Vulkan speech.
+# Check raw samples, before Sonic changes their amplitude or timing.
+_DECODER_START_SIGNATURE = (
+    (0, -35), (2, -66), (4, -170), (10, -244), (21, -192),
+    (32, 70), (49, 66), (64, 84), (80, 2), (110, -16),
+)
+
+
+def _is_decoder_start(pcm, count):
+    return count > _DECODER_START_SIGNATURE[-1][0] and all(
+        abs(pcm[index] * _PCM16_MAX - sample) <= _DECODER_SIGNATURE_TOLERANCE
+        for index, sample in _DECODER_START_SIGNATURE
+    )
+
+
+def _quiet_decoder_start(pcm):
+    # Silence the pulse only if a quiet run separates it from speech. Leave
+    # all subsequent audio unchanged and let NVDA handle the actual trimming.
+    quiet = 0
+    for index, sample in enumerate(memoryview(pcm).cast("h")[:_DECODER_START_SCAN_SAMPLES]):
+        peak = abs(sample)
+        if peak > _DECODER_START_MAX_PEAK:
+            return pcm
+        quiet = quiet + 1 if peak <= _NVDA_SILENCE_PEAK else 0
+        if quiet == _DECODER_START_QUIET_SAMPLES:
+            cutoff = (index + 1 - quiet) * 2
+            return bytes(cutoff) + pcm[cutoff:] if cutoff else pcm
+    return pcm
+
 
 def percent(value):
     return max(0, min(100, int(value)))
@@ -62,10 +97,12 @@ class PauseAdjuster:
 
 
 class Processor:
-    def __init__(self, rate, pitch, volume, boost):
+    def __init__(self, rate, pitch, volume, boost, trim_leading_silence=False):
         from synthDrivers import _sonic
         _sonic.initialize()
         self._mute = percent(volume) == 0
+        self._check_decoder_start = trim_leading_silence and not self._mute
+        self._has_decoder_start = False
         self._stream = _sonic.SonicStream(SAMPLE_RATE, 1)
         position = (percent(rate) - 50) / 50
         if boost:
@@ -76,11 +113,21 @@ class Processor:
         self._stream.volume = percent(volume) / 100
 
     def process(self, pcm, count):
+        if count and self._check_decoder_start:
+            self._check_decoder_start = False
+            self._has_decoder_start = _is_decoder_start(pcm, count)
         self._stream.writeFloat(pcm, count)
-        output = bytes(self._stream.readShort())
-        return bytes(len(output)) if self._mute else output
+        return self._read()
 
     def finish(self):
         self._stream.flush()
+        return self._read()
+
+    def _read(self):
         output = bytes(self._stream.readShort())
-        return bytes(len(output)) if self._mute else output
+        if self._mute:
+            return bytes(len(output))
+        if output and self._has_decoder_start:
+            self._has_decoder_start = False
+            return _quiet_decoder_start(output)
+        return output

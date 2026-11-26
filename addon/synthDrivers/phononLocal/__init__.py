@@ -76,6 +76,7 @@ class SynthDriver(BaseSynth):
         self._gpuAdapter = _settings.gpu_adapter()
         self.backendGpuName = ""
         self._backendState = "starting"
+        self._trim_leading_silence = config.conf["speech"].get("trimLeadingSilence", True)
         self._player = nvwave.WavePlayer(1, SAMPLE_RATE, 16, outputDevice=config.conf["audio"]["outputDevice"])
         self._worker = threading.Thread(target=self._run, name="Phonon native speech", daemon=True)
         self._worker.start()
@@ -288,6 +289,7 @@ class SynthDriver(BaseSynth):
         voice, rate, pitch, volume, boost, pause_length, voice_variation = settings
         engine.set_temperature(VOICE_VARIATIONS[voice_variation][1])
         locale = self._voice_language(voice)
+        trim_leading_silence = self._trim_leading_silence
         for kind, value in prepared:
             if not self._current(epoch):
                 return
@@ -298,9 +300,11 @@ class SynthDriver(BaseSynth):
             elif kind == "index":
                 self._feed(epoch, callback=lambda index=value: self._index(epoch, index))
             elif kind == "break":
+                trim_leading_silence = False
                 self._feed(epoch, b"\0\0" * (SAMPLE_RATE * value // 1000))
             elif kind == "text":
-                processor = Processor(rate, pitch, volume, boost)
+                processor = Processor(rate, pitch, volume, boost, trim_leading_silence)
+                trim_leading_silence = False
                 pauses = PauseAdjuster(pause_length, volume) if volume and pause_length != "default" else None
 
                 def consume(pcm, count):
